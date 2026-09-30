@@ -1,0 +1,27 @@
+{
+  "_readme": [
+    "Runtime configuration for the Photoshop AI Studio plugin.",
+    "Read by lib/bridge.js at startup. Editable while the plugin is loaded:",
+    "UXP Developer Tool reloads the plugin when the file changes.",
+    "Values must match the MCP server's PLUGIN_PORT and WORKSPACE_ROOT (see",
+    ".env.example in the repository root)."
+  ],
+
+  "bridgeUrl": "ws://localhost:3002/bridge",
+
+  "_workspaceRoot": [
+    "Photoshop-side filesystem allowlist. The MCP server already validates every",
+    "path against its own WORKSPACE_ROOT; this is the independent second check",
+    "that runs inside Photoshop. A path must be inside BOTH to be usable.",
+    "Absolute POSIX or Windows path, e.g. /Users/you/ps-ai-studio/workspace",
+    "or C:/Users/you/ps-ai-studio/workspace"
+  ],
+  "workspaceRoot": "/Users/you/photoshop-ai-studio/workspace",
+
+  "_outputDir": "Where export_png / export_jpg / save_psd write when no path is given.",
+  "outputDir": "/Users/you/photoshop-ai-studio/workspace/out",
+
+  "_reconnect": "WebSocket reconnect backoff bounds, milliseconds.",
+  "reconnectBaseMs": 500,
+  "reconnectMaxMs": 15000
+}

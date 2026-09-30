@@ -1,0 +1,54 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # `npm test` builds first (the services import shared/dist), so this is the
+      # typecheck as well as the test run.
+      - name: Test
+        run: npm test
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+
+      - name: Tool reference is up to date
+        run: |
+          node scripts/generate-tool-docs.mjs
+          git diff --exit-code -- docs/mcp-tools.md
+
+      # The plugin is plain JavaScript loaded by Photoshop, with no build step, so
+      # `tsc` never sees it. A syntax error would only surface in Photoshop.
+      - name: UXP plugin parses
+        run: |
+          for f in photoshop-plugin/index.js photoshop-plugin/lib/*.js photoshop-plugin/lib/ops/*.js; do
+            node --check "$f"
+          done
+          node -e "JSON.parse(require('fs').readFileSync('photoshop-plugin/manifest.json','utf8'))"
+
+      # Boots the whole stack against the in-memory adapter and runs the demo
+      # request from §29 of the brief.
+      - name: End-to-end demo
+        run: |
+          node scripts/smoke.mjs

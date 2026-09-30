@@ -1,0 +1,32 @@
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+.tsbuildinfo
+
+.env
+.env.local
+.env.*.local
+
+coverage/
+.nyc_output/
+
+studio/.vite/
+studio/node_modules/
+
+# UXP / Photoshop
+photoshop-plugin/unpacked/
+photoshop-plugin/.uxp/
+*.log
+
+# runtime data
+data/
+logs/
+tmp/
+
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/*
+!.vscode/extensions.json

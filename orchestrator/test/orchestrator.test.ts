@@ -1,0 +1,426 @@
+import type { AddressInfo } from 'node:net';
+import type { Server } from 'node:http';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+
+import type { RunDetail } from '@photoshop-ai-studio/shared';
+import { LogBus, createLogger } from '@photoshop-ai-studio/shared/node';
+import { MockPhotoshopAdapter } from '@photoshop-ai-studio/mcp-server/adapter/mock-adapter';
+import { createHttpApp } from '@photoshop-ai-studio/mcp-server/http';
+import { Workspace } from '@photoshop-ai-studio/mcp-server/workspace';
+
+import { loadConfig } from '../src/config.js';
+import { McpClient } from '../src/mcp/client.js';
+import { Orchestrator } from '../src/orchestrator.js';
+import type { OrchestratorConfig } from '../src/config.js';
+
+/**
+ * Orchestrator tests (brief §28).
+ *
+ * The stack under test is the real one: a real MCP server on a real socket, a
+ * real MCP client, and the real Orchestrator — only the Photoshop adapter and the
+ * model provider are substituted. That is deliberate: a unit test that mocks the
+ * MCP client would not catch a schema or transport mistake, which is exactly the
+ * kind of bug this layer exists to prevent.
+ */
+
+let dataDir: string;
+let workspaceDir: string;
+let adapter: MockPhotoshopAdapter;
+let mcpServer: Server;
+let client: McpClient;
+let events: { publish: (event: unknown) => void };
+
+/** Build a fresh orchestrator against the shared MCP server. */
+function makeOrchestrator(overrides: Partial<OrchestratorConfig> = {}): Orchestrator {
+  const base = loadConfig();
+  const config: OrchestratorConfig = {
+    ...base,
+    mcpUrl,
+    dataDir,
+    logLevel: 'error',
+    logFile: null,
+    maxRepairAttempts: 2,
+    ...overrides,
+  };
+  const logger = createLogger({ source: 'orchestrator', level: 'error', console: false });
+  return new Orchestrator({ config, logger, client, events: events as never });
+}
+
+let mcpUrl: string;
+
+beforeAll(async () => {
+  workspaceDir = mkdtempSync(join(tmpdir(), 'studio-orch-ws-'));
+  dataDir = mkdtempSync(join(tmpdir(), 'studio-orch-data-'));
+  adapter = new MockPhotoshopAdapter({ workspace: new Workspace(workspaceDir, join(workspaceDir, 'out')) });
+
+  const bus = new LogBus();
+  const logger = createLogger({ source: 'mcp', level: 'error', bus, console: false });
+  const { app } = createHttpApp({ adapter, logger, bus, allowedHosts: [], allowedOrigins: [] });
+  mcpServer = await new Promise<Server>((resolve) => {
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
+  });
+  mcpUrl = `http://127.0.0.1:${(mcpServer.address() as AddressInfo).port}/mcp`;
+
+  client = new McpClient({ url: mcpUrl, timeoutMs: 10_000, logger });
+  events = { publish: () => undefined };
+});
+
+afterAll(async () => {
+  await client?.close();
+  await new Promise<void>((resolve) => mcpServer?.close(() => resolve()));
+  rmSync(workspaceDir, { recursive: true, force: true });
+  rmSync(dataDir, { recursive: true, force: true });
+});
+
+beforeEach(() => {
+  adapter.reset();
+});
+
+/** Reaches into the mock's document store to simulate a Photoshop-side lock. */
+function lockLayer(target: MockPhotoshopAdapter, layerId: number, locked: boolean): void {
+  const store = (target as unknown as { documents: Map<string, { layers: Record<string, unknown>[] }> }).documents;
+  store.forEach((doc) => {
+    const layer = doc.layers.find((l) => l.id === layerId);
+    if (layer) layer.isLocked = locked;
+  });
+}
+
+/** Submit + (optionally) approve, returning the finished run detail. */
+async function run(
+  orchestrator: Orchestrator,
+  message: string,
+  options: { approve?: boolean; approveDestructive?: boolean } = {},
+): Promise<RunDetail> {
+  const { run } = await orchestrator.submit({ sessionId: 'test', message });
+  const approve = options.approve ?? true;
+  if (!approve) return orchestrator.getRun(run.id);
+  const decisions = (run.confirmations ?? []).map((c) => ({
+    stepId: c.stepId,
+    approved: options.approveDestructive ?? true,
+  }));
+  return orchestrator.approve(run.id, decisions, { autoApprove: true });
+}
+
+// ---------------------------------------------------------------------------
+
+describe('simple request (JEV fast path)', () => {
+  it('routes a rename to the fast path, executes and verifies it', async () => {
+    const orchestrator = makeOrchestrator();
+    const submitted = await orchestrator.submit({ sessionId: 'test', message: 'rename Logo to Company Logo' });
+
+    expect(submitted.run.route).toBe('jev-fast-path');
+    expect(submitted.run.status).toBe('awaiting_approval');
+    expect(submitted.run.plan?.steps).toHaveLength(1);
+    expect(submitted.run.plan?.steps[0]?.tool).toBe('photoshop.rename_layer');
+    // The fast path resolves the target against real state, so it must use the id.
+    expect(submitted.run.plan?.steps[0]?.params).toMatchObject({ name: 'Company Logo' });
+
+    const detail = await orchestrator.approve(submitted.run.id);
+    expect(detail.run.status).toBe('succeeded');
+    expect(detail.verification?.passed).toBe(true);
+    expect(detail.verification?.checks).toHaveLength(1);
+    expect(detail.diff?.layers[0]).toMatchObject({ name: 'Company Logo', status: 'changed' });
+  });
+
+  it('resolves set-opacity and hide through the fast path', async () => {
+    const orchestrator = makeOrchestrator();
+
+    const opacity = await run(orchestrator, 'set the Title opacity to 70%');
+    expect(opacity.run.status).toBe('succeeded');
+    expect(opacity.verification?.passed).toBe(true);
+
+    const hide = await run(orchestrator, 'hide Background');
+    expect(hide.run.status).toBe('succeeded');
+    expect(hide.verification?.passed).toBe(true);
+
+  });
+
+  it('defers a compound instruction to the planner', async () => {
+    const orchestrator = makeOrchestrator();
+    const { run: submitted } = await orchestrator.submit({
+      sessionId: 'test',
+      message: 'hide Background and then export png',
+    });
+    expect(submitted.route).not.toBe('jev-fast-path');
+  });
+
+  it('asks for clarification instead of failing when the intent is ambiguous', async () => {
+    const orchestrator = makeOrchestrator();
+    const { run: submitted, message } = await orchestrator.submit({
+      sessionId: 'test',
+      message: 'set opacity to 70%',
+    });
+    expect(submitted.status).toBe('failed');
+    expect(submitted.error?.code).toBe('PLAN_INVALID');
+    expect(submitted.error?.recoverable).toBe(true);
+    expect(message.length).toBeGreaterThan(10);
+  });
+});
+
+describe('complex request', () => {
+  it('plans, approves, executes, diffs and verifies a square variant', async () => {
+    const orchestrator = makeOrchestrator();
+    const detail = await run(orchestrator, 'Create a square version of this banner.');
+
+    expect(detail.run.status).toBe('succeeded');
+    expect(detail.run.route).toBe('llm');
+    expect(detail.run.plan?.steps.length).toBeGreaterThan(5);
+
+    // The original must be untouched: the first step duplicates.
+    expect(detail.run.plan?.steps[0]?.tool).toBe('photoshop.duplicate_document');
+    expect(detail.run.plan?.steps[1]?.tool).toBe('photoshop.resize_canvas');
+    expect(detail.run.plan?.steps.some((s) => s.tool === 'photoshop.export_png')).toBe(true);
+
+    expect(detail.verification?.passed).toBe(true);
+    expect(detail.verification?.failedCount).toBe(0);
+
+    // The diff must show the canvas change and the repositioned layers.
+    expect(detail.diff?.documentChanges).toEqual(
+      expect.arrayContaining([{ property: 'width', before: 1920, after: 1080 }]),
+    );
+    expect(detail.diff?.summary.changed).toBeGreaterThan(0);
+
+    const executed = detail.run.executedSteps;
+    expect(executed.every((step) => step.status === 'succeeded')).toBe(true);
+    expect(executed.some((step) => step.tool === 'photoshop.export_png')).toBe(true);
+  });
+
+  it('groups layers and verifies the new hierarchy', async () => {
+    const orchestrator = makeOrchestrator();
+    const detail = await run(orchestrator, 'Group the Logo and the Title into a Header');
+    expect(detail.run.status).toBe('succeeded');
+    expect(detail.verification?.passed).toBe(true);
+  });
+
+  it('reports a diff even when nothing changed', async () => {
+    const orchestrator = makeOrchestrator();
+    const detail = await run(orchestrator, 'hide Background');
+    // Hiding an already-hidden layer changes nothing.
+    const second = await run(orchestrator, 'hide Background');
+    expect(second.run.status).toBe('succeeded');
+    expect(detail.run.status).toBe('succeeded');
+  });
+});
+
+describe('approval, safety and cancellation', () => {
+  it('marks destructive steps and requires confirmation', async () => {
+    const orchestrator = makeOrchestrator();
+    const { run: submitted } = await orchestrator.submit({ sessionId: 'test', message: 'delete layer CTA' });
+
+    expect(submitted.requiresConfirmation).toBe(true);
+    expect(submitted.status).toBe('awaiting_confirmation');
+    expect(submitted.confirmations[0]?.question).toMatch(/Delete layer/);
+    expect(submitted.confirmations[0]?.risk).toBe('high');
+  });
+
+  it('does not touch the document until the user approves', async () => {
+    const orchestrator = makeOrchestrator();
+    const before = await adapter.getDocument();
+    const { run: submitted } = await orchestrator.submit({ sessionId: 'test', message: 'delete layer CTA' });
+    const stillThere = await adapter.getDocument();
+    expect(stillThere.layers).toHaveLength(before.layers.length);
+    expect(submitted.executedSteps).toHaveLength(0);
+  });
+
+  it('skips a rejected step and completes the rest', async () => {
+    const orchestrator = makeOrchestrator();
+    const { run: submitted } = await orchestrator.submit({ sessionId: 'test', message: 'export png' });
+    const detail = await orchestrator.approve(submitted.id, [{ stepId: 'step-1', approved: false }]);
+
+    expect(detail.run.executedSteps[0]?.status).toBe('rejected');
+    // Verification of a rejected step fails, which is correct: nothing happened.
+    expect(detail.verification?.passed).toBe(false);
+  });
+
+  it('cancels a run that is still awaiting approval', async () => {
+    const orchestrator = makeOrchestrator();
+    const { run: submitted } = await orchestrator.submit({ sessionId: 'test', message: 'export png' });
+    const cancelled = orchestrator.cancel(submitted.id);
+    expect(cancelled.run.status).toBe('cancelled');
+    expect(cancelled.run.error?.code).toBe('CANCELLED');
+  });
+
+  it('rejects approving an unknown run', async () => {
+    const orchestrator = makeOrchestrator();
+    await expect(orchestrator.approve('nope')).rejects.toThrow(/Unknown run/);
+  });
+});
+
+describe('verification catches a lying tool', () => {
+  it('fails when the plan claims a state Photoshop never reached', async () => {
+    const orchestrator = makeOrchestrator();
+
+    // A step that reports success but does not move the layer: verification must
+    // notice, because it re-reads the document rather than trusting the result.
+    const originalMove = adapter.moveLayer.bind(adapter);
+    (adapter as unknown as { moveLayer: typeof adapter.moveLayer }).moveLayer = async () => {
+      await originalMove({ layerName: 'Title', x: 5, y: 5 });
+      return { id: 3, name: 'Title', type: 'text', visible: true, opacity: 100, x: 5, y: 5, width: 100, height: 40, parentId: null };
+    };
+
+    const { run: submitted } = await orchestrator.submit({ sessionId: 'test', message: 'center the Title' });
+    const detail = await orchestrator.approve(submitted.id);
+
+    expect(detail.run.executedSteps[0]?.status).toBe('succeeded');
+    expect(detail.verification?.passed).toBe(false);
+    expect(detail.verification?.failedCount).toBeGreaterThan(0);
+    expect(detail.verification?.checks.some((c) => c.status === 'failed')).toBe(true);
+
+    (adapter as unknown as { moveLayer: typeof adapter.moveLayer }).moveLayer = originalMove;
+  });
+});
+
+describe('repair loop', () => {
+  it('repairs a failed verification and re-verifies', async () => {
+    const orchestrator = makeOrchestrator();
+
+    // Fail the first move; the repair re-issues it from the report.
+    let calls = 0;
+    const originalMove = adapter.moveLayer.bind(adapter);
+    (adapter as unknown as { moveLayer: typeof adapter.moveLayer }).moveLayer = async (sel, position) => {
+      calls += 1;
+      if (calls === 1) {
+        // Report a position Photoshop never applied.
+        const fake = await originalMove({ layerName: 'Title' }, {});
+        return { ...fake, x: 1, y: 1 };
+      }
+      return originalMove(sel, position);
+    };
+
+    const { run: submitted } = await orchestrator.submit({ sessionId: 'test', message: 'center the Title' });
+    const detail = await orchestrator.approve(submitted.id);
+
+    // One retry, then success: the repair re-issues the *same* coordinates in a
+    // single move_layer step rather than replaying a stale snapshot.
+    expect(calls).toBe(2);
+    expect(detail.run.repairAttempts).toBe(1);
+    expect(detail.verification?.passed).toBe(true);
+    expect(detail.run.status).toBe('succeeded');
+    expect(detail.run.executedSteps.some((step) => step.isRepair)).toBe(true);
+
+    (adapter as unknown as { moveLayer: typeof adapter.moveLayer }).moveLayer = originalMove;
+  });
+
+  it('stops after the configured repair budget', async () => {
+    const orchestrator = makeOrchestrator({ maxRepairAttempts: 1 });
+
+    const originalMove = adapter.moveLayer.bind(adapter);
+    (adapter as unknown as { moveLayer: typeof adapter.moveLayer }).moveLayer = async (sel, position) => {
+      const fake = await originalMove({ layerName: 'Title' }, {});
+      void sel;
+      void position;
+      return { ...fake, x: 7, y: 7 };
+    };
+
+    const { run: submitted } = await orchestrator.submit({ sessionId: 'test', message: 'center the Title' });
+    const detail = await orchestrator.approve(submitted.id);
+
+    expect(detail.run.repairAttempts).toBe(1);
+    expect(detail.verification?.passed).toBe(false);
+    expect(detail.run.status).toBe('failed');
+
+    (adapter as unknown as { moveLayer: typeof adapter.moveLayer }).moveLayer = originalMove;
+  });
+
+  it('never enters a repair loop for a non-recoverable failure', async () => {
+    const orchestrator = makeOrchestrator();
+
+    // Lock the layer: the operation cannot be performed at all, so re-planning
+    // against the same state would only burn the budget.
+    const state = await adapter.getDocument();
+    const title = state.layers.find((l) => l.name === 'Title')!;
+    lockLayer(adapter, title.id, true);
+
+    const { run: submitted } = await orchestrator.submit({ sessionId: 'test', message: 'center the Title' });
+    const detail = await orchestrator.approve(submitted.id);
+
+    expect(detail.run.status).toBe('failed');
+    expect(detail.run.repairAttempts).toBe(0);
+    expect(detail.run.error?.code).toBe('LAYER_LOCKED');
+    expect(detail.run.error?.recoverable).toBe(false);
+
+    lockLayer(adapter, title.id, false);
+  });
+});
+
+describe('history', () => {
+  it('records one entry per finished run with the full audit trail', async () => {
+    const orchestrator = makeOrchestrator();
+    await run(orchestrator, 'rename Logo to Company Logo');
+
+    const records = orchestrator.listHistory();
+    const record = records.find((r) => r.goal === 'Rename "Logo" to "Company Logo"');
+    expect(record).toBeDefined();
+    expect(record?.userRequest).toBe('rename Logo to Company Logo');
+    expect(record?.status).toBe('succeeded');
+    expect(record?.toolsExecuted).toEqual(['photoshop.rename_layer']);
+    expect(record?.plan?.steps).toHaveLength(1);
+    expect(record?.verification?.passed).toBe(true);
+    expect(record?.diff).not.toBeNull();
+    expect(record?.durationMs).toBeGreaterThanOrEqual(0);
+    expect(record?.route).toBe('jev-fast-path');
+    expect(record?.errors).toEqual([]);
+  });
+
+  it('records a failed step with its error', async () => {
+    const orchestrator = makeOrchestrator();
+    // First export writes the file; the second refuses to clobber it, which is a
+    // recoverable failure the repair loop then tries to work around.
+    await run(orchestrator, 'export png');
+    const detail = await run(orchestrator, 'export png');
+
+    expect(detail.run.status).toBe('failed');
+    const record = orchestrator.listHistory().find((r) => r.id.startsWith(detail.run.id));
+    expect(record?.status).toBe('failed');
+    expect(record?.errors.map((e) => e.code)).toContain('FILE_EXISTS');
+    expect(record?.errors.find((e) => e.code === 'FILE_EXISTS')?.recoverable).toBe(true);
+  });
+
+  it('records a clarification as a failed run rather than a silent no-op', async () => {
+    const orchestrator = makeOrchestrator();
+    await orchestrator.submit({ sessionId: 'test', message: 'set opacity to 70%' });
+    const record = orchestrator.listHistory().find((r) => r.userRequest === 'set opacity to 70%');
+    expect(record?.status).toBe('failed');
+    expect(record?.errors[0]?.code).toBe('PLAN_INVALID');
+    expect(record?.plan).toBeNull();
+  });
+
+  it('persists history to disk as JSONL', async () => {
+    const orchestrator = makeOrchestrator();
+    await run(orchestrator, 'hide Background');
+    const { readFileSync } = await import('node:fs');
+    const contents = readFileSync(join(dataDir, 'history.jsonl'), 'utf8').trim().split('\n');
+    expect(contents.length).toBeGreaterThan(0);
+    expect(JSON.parse(contents[contents.length - 1]!)).toMatchObject({ status: expect.any(String) });
+  });
+});
+
+describe('state', () => {
+  it('exposes a snapshot and the tool list', async () => {
+    const orchestrator = makeOrchestrator();
+    const { snapshot, tools } = await orchestrator.getState();
+    expect(snapshot?.document.name).toBe('banner.psd');
+    expect(snapshot?.layers).toHaveLength(5);
+    expect(tools).toContain('photoshop.resize_canvas');
+    expect(tools.length).toBeGreaterThan(20);
+  });
+
+  it('reports a disconnected orchestrator state without throwing', async () => {
+    const broken = new McpClient({ url: 'http://127.0.0.1:1/mcp', timeoutMs: 500, logger: createLogger({ source: 'orchestrator', level: 'error', console: false }) });
+    const config = { ...loadConfig(), mcpUrl: 'http://127.0.0.1:1/mcp', dataDir };
+    const orchestrator = new Orchestrator({
+      config,
+      logger: createLogger({ source: 'orchestrator', level: 'error', console: false }),
+      client: broken,
+      events: events as never,
+    });
+    const { snapshot, connection } = await orchestrator.getState();
+    expect(snapshot).toBeNull();
+    expect(connection.connected).toBe(false);
+    expect(connection.lastError).toBeTruthy();
+  });
+});

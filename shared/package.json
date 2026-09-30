@@ -1,0 +1,26 @@
+{
+  "name": "@photoshop-ai-studio/shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared schemas, Photoshop adapter contract and MCP<->UXP bridge protocol.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./node": {
+      "types": "./dist/node.d.ts",
+      "default": "./dist/node.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "zod": "^4.6.5"
+  }
+}

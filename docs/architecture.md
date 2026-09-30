@@ -1,0 +1,484 @@
+# Architecture
+
+Photoshop AI Studio is five components with one direction of authority. Each
+boundary exists because the alternative was to trust an AI with something it
+should not be trusted with.
+
+```text
+┌──────────┐   REST + NDJSON    ┌───────────────┐   MCP/StreamableHTTP   ┌─────────────┐   WebSocket   ┌────────────┐
+│  Studio  │ ─────────────────► │ Orchestrator  │ ────────────────────► │ MCP server  │ ◄───────────► │ UXP plugin  │ ──► Photoshop
+│ (browser)│ ◄───────────────── │  (Node)       │ ◄──────────────────── │  (Node)     │   bridge      │  (in PS)    │
+└──────────┘   log + run events └───────┬───────┘   structured results   └──────┬──────┘               └────────────┘
+                                      │                                        │
+                                      ▼                                        ▼
+                            Model Gateway                          PhotoshopAdapter
+                     (LLM / JEV, provider-agnostic)      (UxpRemoteAdapter | MockPhotoshopAdapter)
+```
+
+Authority flows one way. The model proposes; the Orchestrator disposes; only the
+adapter touches Photoshop; only the plugin knows Adobe exists.
+
+---
+
+## Table of contents
+
+1. [Component responsibilities](#1-component-responsibilities)
+2. [ADR-001 — The plugin dials out to the MCP server](#adr-001--the-plugin-dials-out-to-the-mcp-server)
+3. [ADR-002 — JSON envelopes on the bridge, MCP at the layer above](#adr-002--json-envelopes-on-the-bridge-mcp-at-the-layer-above)
+4. [ADR-003 — One operation registry drives the whole tool surface](#adr-003--one-operation-registry-drives-the-whole-tool-surface)
+5. [ADR-004 — The Orchestrator is an MCP *client*; the browser is not](#adr-004--the-orchestrator-is-an-mcp-client-the-browser-is-not)
+6. [ADR-005 — Stateless MCP server](#adr-005--stateless-mcp-server)
+7. [ADR-006 — Verification re-reads the document](#adr-006--verification-re-reads-the-document)
+8. [ADR-007 — Expectations are derived, not trusted](#adr-007--expectations-are-derived-not-trusted)
+9. [ADR-008 — The model cannot mark a step safe](#adr-008--the-model-cannot-mark-a-step-safe)
+10. [ADR-009 — JEV abstains rather than guesses](#adr-009--jev-abstains-rather-than-guesses)
+11. [ADR-010 — A mock adapter, not a mock Photoshop](#adr-010--a-mock-adapter-not-a-mock-photoshop)
+12. [Tool surface: why there is no `execute_anything`](#tool-surface-why-there-is-no-execute_anything)
+13. [End-to-end walkthrough](#end-to-end-walkthrough)
+14. [Security model](#security-model)
+15. [Failure modes](#failure-modes)
+16. [Adding a creative application](#adding-a-creative-application)
+17. [Known limitations](#known-limitations)
+18. [Research notes and sources](#research-notes-and-sources)
+
+---
+
+## 1. Component responsibilities
+
+| Component | Owns | Must never |
+|---|---|---|
+| `studio/` | UI, plan rendering, approval surface, live log tail | Speak MCP, hold a credential, call Photoshop |
+| `orchestrator/` | Intent routing, planning, safety gate, execution, diff, verification, repair, history | Know Adobe exists, touch the filesystem outside the workspace |
+| `mcp-server/` | Tool schemas, argument validation, path policy, the bridge | Contain business logic or an LLM call |
+| `photoshop-plugin/` | The only `batchPlay` and the only `require('photoshop')` | Contain an LLM, business rules, or filesystem policy decisions |
+| `shared/` | Schemas, error taxonomy, adapter contract, bridge protocol, diff/expectation maths | Import anything runtime-heavy (`node:fs` lives behind `shared/node`) |
+
+`shared/` is the only place two components agree on anything. The
+`PhotoshopAdapter` interface lives there, which is why the MCP server's tools do
+not know whether they are talking to Photoshop or to the in-memory mock.
+
+---
+
+## ADR-001 — The plugin dials out to the MCP server
+
+**Decision.** The MCP server hosts a WebSocket server on `PLUGIN_PORT`; the UXP
+plugin opens a *client* connection to it.
+
+**Why.** The UXP runtime is a WebSocket client only. Adobe states plainly that
+"plugins can connect to WebSocket servers, but cannot host or accept incoming
+connections"
+([Premiere network recipes](https://developer.adobe.com/premiere-pro/uxp/resources/recipes/network/)). There is no
+`net` module in UXP — the only standalone modules are `fs`, `os` and `uxp` — and
+running a server from UXP is still an open feature request. So the listening
+socket has to live outside Photoshop, and the only workable direction is
+outbound.
+
+**Consequences we accepted:**
+
+- Photoshop needs no inbound firewall allowance.
+- A Photoshop restart is recovered by the plugin's reconnect loop, not by the user.
+- One Photoshop session may be attached at a time; a new connection replaces the
+  old one, which matches reality (the stale socket belongs to a dead process).
+- `loadEvent: "startup"` is set so the socket comes up without opening the panel.
+
+**The manifest detail that is not documented anywhere.** `requiredPermissions.network.domains`
+must list the loopback origins with an explicit scheme and a trailing slash —
+`ws://localhost/`, `http://localhost/` — and the plugin must connect to the
+hostname `localhost`, not the IP literal. Adobe does not document this; it is the
+combination verified to work in practice (and a third-party analysis of the UXP
+manifest parser suggests the parser discards IP-literal hosts before permission
+matching while accepting `localhost` explicitly). Both spellings are declared
+defensively. **If a future Photoshop build rejects the connection**, the symptom
+is a `close` with no `hello`, and the plugin panel shows the exact URL it tried.
+
+**Known platform caveat.** macOS App Transport Security restricts insecure HTTP.
+`ws://localhost` is verified on Windows; on macOS, be ready to put a TLS
+terminating tunnel in front of `PLUGIN_PORT`. This is flagged rather than papered
+over because it cannot be tested from a Linux CI box.
+
+---
+
+## ADR-002 — JSON envelopes on the bridge, MCP at the layer above
+
+**Decision.** The bridge carries a deliberately tiny request/response protocol
+(`{v, type:'op', id, op, params}` → `{v, type:'op.result', id, result}`). MCP
+lives one layer up, in the MCP server.
+
+**Why.** The plugin is plain ES5-ish JavaScript with no bundler and no npm
+dependency — it is loaded from a folder by the UXP Developer Tool. It cannot
+reasonably speak Streamable HTTP's SSE framing, session negotiation or zod
+validation. Meanwhile MCP semantics — tool naming, JSON Schemas, structured
+results, typed errors — belong where the tool list is generated and where a
+standard client can discover it.
+
+**Result.** `MCP Inspector`, any MCP SDK client and any future agent can talk to
+the MCP server. The plugin stays a 12-file, zero-dependency program.
+
+**Both sides agree on:** the protocol version (a mismatch is rejected, not
+guessed), the `{ success, data | error }` envelope, and the operation name set
+(`photoshop-plugin/test/contract.test.ts` fails the build if the plugin's
+dispatch table and `shared`'s registry diverge).
+
+---
+
+## ADR-003 — One operation registry drives the whole tool surface
+
+`shared/src/photoshop/operations.ts` defines, for each of the 30 capabilities:
+the MCP tool name, a planner-facing description, the zod input schema, the result
+schema, and the `destructive` / `requiresConfirmation` flags.
+
+Everything else is derived:
+
+| Consumer | Derived from the registry |
+|---|---|
+| MCP server | tool registration, `outputSchema`, `annotations`, `_meta` for the UI |
+| Orchestrator | prompt catalogue, destructive-step gating, confirmation questions |
+| Studio | the Tools panel, the ⚠ badges in the plan view |
+| Tests | the "covers every capability in the brief" list |
+
+Adding a Photoshop capability means one registry entry, one adapter method and
+one plugin operation. There is no second place to keep in sync, and the mapped
+type `OpDispatcher` makes a missing adapter method a **compile error**, not a
+runtime 404.
+
+**Deliberate constraint: no `z.transform()` and no `.refine()` in tool schemas.**
+MCP converts tool schemas to JSON Schema for the model. Effect-wrapped fields
+(`ZodPipe`, `ZodEffects`) make that conversion lossy, so cross-field rules live
+in `shared/src/photoshop/validation.ts` and colour normalisation happens once, in
+the tool dispatch. The result is a plain `object` JSON Schema that a model reads
+correctly, and identical validation for both adapters.
+
+---
+
+## ADR-004 — The Orchestrator is an MCP *client*; the browser is not
+
+**Decision.** The Studio speaks REST + NDJSON to the Orchestrator. The
+Orchestrator is the MCP client.
+
+**Why.** It keeps credentials and provider selection on the server, and it puts
+the approval gate in the same process as the executor — the browser cannot
+bypass it, because the browser has no execution path at all. It also sidesteps
+the two things that make MCP-in-a-browser awkward: CORS header exposure for
+`Mcp-Session-Id`, and re-bundling an SDK into the UI.
+
+The Vite dev server still proxies `/mcp` through to the MCP server. That path
+exists so `npm run inspector` and manual `curl` work against the same origin the
+UI uses; the UI does not use it.
+
+---
+
+## ADR-005 — Stateless MCP server
+
+**Decision.** `sessionIdGenerator: undefined`. Each `POST /mcp` builds a fresh
+`McpServer` and a fresh transport; the shared adapter carries the only state that
+matters.
+
+**Why.** Our clients are the orchestrator, the Inspector and short-lived browser
+tabs. None benefit from server-side sessions; all of them would leak a session-map
+entry. A stateless server also has no failure mode where "the session went stale
+and the client does not know".
+
+**Cost:** no `GET` notification stream and no `DELETE` teardown — both return
+405. Studio live updates use a separate NDJSON feed at `/events` instead, which
+needs no MCP session and no framing negotiation.
+
+---
+
+## ADR-006 — Verification re-reads the document
+
+`{ success: true }` from a tool is **not** evidence. `batchPlay` can report
+success and leave the layer somewhere else; a Photoshop document can be edited
+between two steps by the user. So after every plan the Orchestrator captures a
+fresh snapshot and evaluates declarative expectations against it.
+
+```text
+expected  layer "Title" opacity = 70
+              ↓  execute
+actual    layer "Title" opacity = 70
+              ↓
+          ✓ Verified
+```
+
+The Orchestrator tests include one that makes an adapter *lie* — returning a
+position Photoshop never applied — and asserts the run still fails verification.
+That test exists because this is the property most likely to rot.
+
+The vision model may add commentary on top, but it can never overturn a failed
+state check: it does not see the document any more precisely than we do.
+
+---
+
+## ADR-007 — Expectations are derived, not trusted
+
+`shared/src/photoshop/expectations.ts` states what "it worked" looks like for
+each tool from its arguments alone:
+
+| Tool | Derived expectation |
+|---|---|
+| `rename_layer` | that layer's `name` equals the new name |
+| `set_layer_opacity` | that layer's `opacity` ≈ the requested value (±0.5) |
+| `move_layer` | `x` / `y` match, ±1 px for rounding |
+| `delete_layer` | the layer is absent |
+| `resize_canvas` | `document.width` / `document.height` match |
+| `move_layer_to_group` | the layer's `parentId` is the group, or its parent is named as given |
+| `export_*` | the file exists |
+| `create_text_layer` | the text content reads back |
+| read-only tools | nothing — there is nothing to verify |
+
+The planner may add its own `expect` entries; those are merged on top and
+de-duplicated by key. It cannot remove a derived one. A model that forgets to
+prove its work still gets checked.
+
+---
+
+## ADR-008 — The model cannot mark a step safe
+
+`buildPlan` derives `destructive` from the tool registry, not from the draft, and
+`evaluateSafety` re-checks the registry at execution time rather than trusting
+the plan object. Editing a plan between approval and execution therefore cannot
+smuggle a deletion past the gate — there is a test for exactly that.
+
+A rejected step is **skipped**, not fatal: if a plan is
+`rename → delete Background → export` and the user refuses the delete, the export
+still happens. A gate that punishes the whole run teaches people to approve
+blindly.
+
+---
+
+## ADR-009 — JEV abstains rather than guesses
+
+The fast path exists so that "hide Background" costs 25 ms instead of a model
+round trip. Its rules abstain in every ambiguous case:
+
+- the layer name does not resolve → `llm`
+- the name is ambiguous (two "Title" layers) → `llm`
+- no document is open → `llm`
+- the instruction is compound ("…and then…") → `llm`
+- confidence is below `JEV_MIN_CONFIDENCE` → `llm`
+
+One deliberate narrowing: the brief's example "set opacity to 70%" names no
+layer. That is only unambiguous in a single-layer document, so the rule accepts
+it there and abstains otherwise. Guessing which layer to fade is the exact
+failure a fast path must not have.
+
+Two implementations sit behind `JevRouter`: the built-in deterministic engine and
+`RemoteJevRouter`, which posts to a real JEV runtime when `JEV_RUNTIME_URL` is
+set. The Orchestrator cannot tell them apart — that is the point of the interface.
+
+---
+
+## ADR-010 — A mock adapter, not a mock Photoshop
+
+`MOCK_PHOTOSHOP=true` swaps `PhotoshopAdapter` for `MockPhotoshopAdapter`: a real
+in-memory document model with real validation, real typed errors, real files on
+disk and a real PNG encoder for previews and exports. It is not a stub.
+
+It exists for two legitimate purposes and one illegitimate one it is guarded
+against:
+
+- **Development** — run the whole pipeline with no Photoshop licence.
+- **Tests** — the orchestrator, verification and repair-loop suites need a
+  document they can mutate deterministically.
+- **Not the production path** (§31). It is selected only by configuration; there
+  is no code path that silently degrades to it.
+
+---
+
+## Tool surface: why there is no `execute_anything`
+
+An open escape hatch — a tool that runs arbitrary ActionDescriptors, or arbitrary
+JavaScript — would let a model bypass schema validation, the workspace allowlist
+and the confirmation gate in one call. It would also make every safety property
+in this document decorative.
+
+`batchPlay` therefore exists in exactly two sanctioned places, and a test walks
+the plugin source to keep it that way:
+
+- `photoshop-plugin/lib/ps.js` — the wrapper that runs descriptors and inspects
+  the result for `{_obj: 'error'}`
+- `photoshop-plugin/lib/ops/*.js` — the individual adapter methods
+
+Every capability the AI can reach is a named, schema-checked, expectation-checked
+operation. If the model needs something new, it is a new tool, reviewed like
+code.
+
+---
+
+## End-to-end walkthrough
+
+The demo request: **"Create a square version of this banner."**
+
+1. **Studio** `POST /api/chat` with the user's words.
+2. **Orchestrator** captures a snapshot *before* planning. The planner never
+   reasons against assumptions.
+3. **JEV** gets first refusal. "Create a square version" is compound, so it
+   abstains and the request goes to the planner.
+4. **Model Gateway** returns a draft: `duplicate_document` → `resize_canvas` →
+   per-layer scale/move → `export_png`.
+5. **Plan builder** assigns ids, resolves defaults, validates every argument,
+   derives destructive flags from the registry, derives expectations, and builds
+   the confirmation question for `export_png`.
+6. **Studio** renders the plan and returns `awaiting_confirmation`.
+7. **User** approves. `POST /api/runs/:id/approve`.
+8. **Executor** walks the steps. Each one is an MCP call; the MCP server
+   validates, applies path policy, and forwards over the WebSocket bridge.
+9. **Plugin** opens one modal scope per operation, runs the DOM call or the
+   `batchPlay` descriptor, checks for an error descriptor, and replies.
+10. **Orchestrator** captures a second snapshot, diffs before/after, and
+    evaluates all expectations.
+11. **Studio** shows the diff, the verification report, and the log.
+
+```
+✓ Completed
+
+Canvas
+1920×1080 → 1080×1080
+
+Layers changed: Background · Company Logo · Title · Subtitle · CTA
+
+Verification:
+✓ document.width  1920 → 1080
+✓ document.height 1080 → 1080
+✓ x of "Title"    expected 251, actual 251
+✓ file out/banner-1080x1080.png exists
+…
+```
+
+If verification fails and the errors are recoverable, the repair loop runs up to
+`AI_MAX_REPAIR_ATTEMPTS` times. A non-recoverable error stops it immediately —
+re-planning against an unchanged document is how you build an infinite loop.
+
+---
+
+## Security model
+
+| Threat | Control | Where |
+|---|---|---|
+| Model deletes or overwrites without consent | destructive flags in the registry, re-checked at execution | `shared/photoshop/operations.ts`, `orchestrator/src/execution/safety.ts` |
+| Model reads or writes arbitrary files | `Workspace` allow-list; path rejected before the bridge | `mcp-server/src/workspace.ts`, plugin `assertInsideWorkspace` |
+| Model runs arbitrary code in Photoshop | no such tool exists; `batchPlay` only inside adapter methods | `photoshop-plugin/lib/ops/*` |
+| Model reaches the shell | no process spawning anywhere in the request path | — |
+| DNS rebinding against a localhost service | `Host` header allow-list before any handler | `mcp-server/src/http.ts` |
+| API keys in the browser | the UI only ever talks to `/api`; keys live in the Orchestrator's env | `orchestrator/src/gateway/*` |
+| Inline handlers needing code generation | `addEventListener` only; `allowCodeGenerationFromStrings` is **not** requested | `photoshop-plugin/index.js` |
+
+The workspace allow-list is applied **twice** — once in the MCP server and once
+inside Photoshop. The plugin is the code that actually opens files, so it does
+not take the server's word for it.
+
+---
+
+## Failure modes
+
+| Situation | Behaviour |
+|---|---|
+| Photoshop closed / plugin not loaded | `NOT_CONNECTED`, recoverable. Tools fail with a message naming the expected bridge URL; Studio shows the plugin as disconnected. |
+| Plugin reloads mid-run | In-flight request rejected with `NOT_CONNECTED`; recoverable, so the repair loop retries against the fresh connection. |
+| Photoshop busy in another modal scope | `MODAL_STATE` (`error.number == 9`), recoverable — the plugin surfaces it instead of failing obscurely. |
+| Tool argument fails the JSON Schema | JSON-RPC `-32602` from the SDK, before dispatch. Classified as a recoverable error by the MCP client so the repair loop can fix the call. |
+| Layer name is ambiguous | `INVALID_PARAMS` listing the candidate ids. Never guesses. |
+| File already exists | `FILE_EXISTS`, recoverable, with the instruction to set `overwrite`. |
+| Plan verification fails | Repair loop, bounded by `AI_MAX_REPAIR_ATTEMPTS`; a non-recoverable error short-circuits it. |
+| Model unreachable / no API key | `MODEL_UNAVAILABLE`, recoverable. With `provider=mock` the deterministic planner keeps the pipeline alive offline. |
+| Request cannot be planned | The model is asked to phrase a clarification; the run is recorded as failed with `PLAN_INVALID`, never as a silent no-op. |
+
+---
+
+## Adding a creative application
+
+Illustrator, Premiere or Blender would slot in **beside** the AI core, not inside
+it. The seams already exist:
+
+1. `shared/photoshop/*` becomes `shared/illustrator/*` — same shapes: a
+   document/layer model, an adapter contract, an operation registry, snapshot,
+   diff and expectations. `DocumentSnapshot` and `DocumentDiff` are generic
+   enough to share outright.
+2. A second MCP server implements `PhotoshopAdapter`'s sibling interface and
+   exposes `illustrator.*` tools. The Orchestrator's `McpClient` becomes a
+   registry of MCP endpoints rather than one URL.
+3. `ModelGateway` is unchanged — it is told which tools exist and what state it is
+   looking at, and it does not know what a layer is.
+4. Studio gains a second source selector. The chat, plan, diff, verification and
+   history surfaces are per-endpoint and already generic.
+
+Nothing in `orchestrator/src/gateway/` or `orchestrator/src/state/` would change.
+That is the test of whether this architecture is doing its job.
+
+---
+
+## Known limitations
+
+Stated plainly, because they are the things most likely to surprise.
+
+1. **The UXP plugin has not been executed against a real Photoshop build in this
+   environment.** The code follows the documented API and is defensive about the
+   parts that vary by build (`bounds` shapes, `LayerKind` enums, `translate` /
+   `scale` fallbacks), and the contract tests check it statically. **Expect to
+   fix something on first run.** The likely candidates are enumerated in
+   `photoshop-plugin/lib/ps.js` where a fallback exists.
+2. **The deterministic planner does not synthesise repairs.** With
+   `AI_PLANNER_PROVIDER=mock` the repair loop is exercised but declines to fix
+   anything it cannot derive mechanically from the verification report. Repairs
+   are useful with a real provider.
+3. **`resize_canvas` does not scale content.** That is correct Photoshop
+   behaviour; the planner is responsible for follow-up `move_layer` /
+   `resize_layer` steps, and the bundled deterministic planner does that.
+4. **No "selected layer" concept.** "Set opacity to 70%" needs a target. The
+   bundled planner resolves it from a named layer or, for a single-layer
+   document, from the only layer.
+5. **The mock adapter writes a JSON placeholder for `.psd` and `.jpg`.** PNG is
+   real. Files are real; PSD/JPEG bytes are not. `file_exists` verification is
+   therefore honest, but do not open a mock `.jpg` in Photoshop.
+6. **`ws://localhost` is verified on Windows only.** macOS ATS may require a TLS
+   tunnel in front of `PLUGIN_PORT`.
+7. **Text colour is read back with `batchPlay`,** because the UXP DOM does not
+   expose a reliable text-colour getter. Verification of `set_text_color`
+   therefore depends on that descriptor.
+8. **`manifestVersion: 6` is not used.** Photoshop documents v4 and v5; there is
+   no Photoshop documentation for v6.
+
+---
+
+## Research notes and sources
+
+Read before extending the plugin. All verified against Adobe's documentation in
+September 2026.
+
+**UXP networking**
+- <https://developer.adobe.com/premiere-pro/uxp/resources/recipes/network/> —
+  WebSocket is client-only; plugins cannot host.
+- <https://developer.adobe.com/photoshop/uxp/2022/guides/uxp-guide/uxp-misc/manifest-v5/> —
+  deny-by-default permissions; `network.domains` requires explicit schemes.
+- <https://developer.adobe.com/photoshop/uxp/2022/uxp-api/changelog3-p> — top-level
+  wildcard domains rejected from UXP 7.4 (PS 25.5).
+- <https://github.com/AdobeDocs/uxp-photoshop/issues/321> — `127.0.0.1` alone is
+  not understood by the manifest parser.
+- <https://github.com/AdobeDocs/uxp-photoshop-plugin-samples/tree/main/io-websocket-example>
+  — Adobe's own working plugin↔local-server sample.
+- <https://developer.adobe.com/photoshop/uxp/2022/uxp-api/known-issues> — self-signed
+  TLS does not work with `wss` on macOS; WebSocket extensions unsupported.
+
+**Photoshop UXP API**
+- <https://developer.adobe.com/photoshop/uxp/2022/ps_reference/classes/document/>
+  — `saveAs.<format>(entry, options, asCopy)` is an object of functions; there is
+  no `exportDocument`; the property is `mode`, not `colorMode`.
+- <https://developer.adobe.com/photoshop/uxp/2022/ps_reference/objects/createoptions/textlayercreateoptions/>
+  — `document.createTextLayer` (24.2+).
+- <https://developer.adobe.com/photoshop/uxp/2022/ps_reference/media/batchplay/>
+  — `batchPlay` resolves on failure; inspect `_obj === 'error'`.
+- <https://developer.adobe.com/photoshop/uxp/2022/ps_reference/media/executeasmodal/>
+  — `commandName` is required; `number == 9` means the modal scope is taken.
+- <https://developer.adobe.com/photoshop/uxp/2022/ps_reference/media/photoshopcore/> —
+  `getLayerTreeSync`, `getLayerGroupContents`.
+- <https://developer.adobe.com/photoshop/uxp/2022/guides/debugging/> — the UXP
+  Developer Tool is the only supported way to load a development plugin.
+
+**MCP TypeScript SDK**
+- <https://github.com/modelcontextprotocol/typescript-sdk/tree/v1.x> — v1.31.0 is
+  the current release of the monolithic package; v2 is a package rename and a
+  breaking API change, tracked separately in `docs/development.md`.
+- <https://modelcontextprotocol.io/specification/2025-11-25/server/tools> — tool
+  names may contain dots, which is what makes `photoshop.get_document` legal.
+- MCP SDK behaviour worth knowing: the tool `outputSchema` is only advertised
+  when the schema's root is an *object*; a root union is silently dropped. The
+  result envelope here is therefore one flat object with two optional payloads.
