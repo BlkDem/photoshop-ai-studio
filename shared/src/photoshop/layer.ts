@@ -66,6 +66,17 @@ export const BlendModeSchema = z.enum([
 ]);
 export type BlendMode = z.infer<typeof BlendModeSchema>;
 
+/**
+ * A blend mode *as the host reports it*.
+ *
+ * Loose on purpose, and deliberately not the enum above. The enum is for
+ * requests, where a strict list turns a model's typo into a clear error. A
+ * report is evidence: if Photoshop 26.11 answers `darkerColor` as something the
+ * list does not contain, the useful thing to pass on is what it actually said,
+ * not a value the schema would have preferred.
+ */
+export const ReportedBlendModeSchema = z.string().min(1);
+
 /** Axis-aligned bounds in document pixels. Zero-sized for empty layers. */
 export const BoundsSchema = z.object({
   x: z.number(),
@@ -92,7 +103,7 @@ export const LayerInfoSchema = z.object({
 
   // --- optional enrichment ------------------------------------------------
   fillOpacity: z.number().min(0).max(100).optional(),
-  blendMode: BlendModeSchema.optional(),
+  blendMode: ReportedBlendModeSchema.optional(),
   isBackground: z.boolean().optional(),
   isClippingMask: z.boolean().optional(),
   isLocked: z.boolean().optional(),

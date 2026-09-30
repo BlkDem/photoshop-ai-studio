@@ -406,35 +406,94 @@ That is the test of whether this architecture is doing its job.
 
 ---
 
+## Platform boundary: what UXP will and will not do
+
+The tool surface is not a matter of taste. It is bounded by what Photoshop 26.11
+/ UXP 9.0.2 will actually perform, and the boundary is not where the API
+reference says it is.
+
+**Everything reachable through the UXP DOM works**, with two rules learned on
+device: geometry and style methods act on the **active** layer, so they must
+select it first; and several of them return without error while doing nothing, so
+a result has to be read back before it is reported.
+
+**Nothing that requires `batchPlay` can be relied on.** Five attempts, five
+different failures, none reported as an error:
+
+| Attempted | Outcome |
+|---|---|
+| `crop` (discard pixels outside a rect) | refused: "The user cancelled the operation" |
+| `transform` (offset, scale) | every form accepted; the layer never moved |
+| `textStyleRange` / `set` | accepted; opened a modal dialog that wedged the plugin |
+| `make` (layer mask) | accepted; no mask appeared |
+| `make` (adjustment layer) | accepted; the layer stack came back *different* |
+
+`batchPlay` resolving is not evidence that anything happened. The adjustment case
+is the important one: verification failed *and the document was left altered*, so
+even "check afterwards and fail" is not a safe pattern here. This is why no
+operation in this codebase is built on a descriptor when the DOM has no
+equivalent, and why `photoshop.get_capabilities` reports `api` separately from
+`usable` — the API reference is a list of things that exist, not a list of things
+that work.
+
+### Consequences for coverage
+
+Reachable and implemented: documents (create/read/duplicate/save/close/list),
+layers (create/delete/rename/reorder/group/move/scale/visibility/opacity/blend
+mode/fill opacity), text (create/read/update/position/size/colour/style patch),
+images (place, resize), canvas (resize, selection), export (PNG/JPG/PSD, preview).
+
+Deliberately absent, and why:
+
+- **Layer masks and smart objects.** No DOM equivalent, and `make` /
+  `convertToSmartObject` are among the failures above. A tool that reported a
+  mask it could not verify would be worse than no tool, and `convertToSmartObject`
+  wedged the bridge outright.
+- **Adjustment layers, channels, colour-mode conversion.** The same mechanism.
+- **History / undo.** The DOM exposes no history, and a descriptor-driven undo is
+  the same class of risk.
+- **Generative Fill, Neural Filters, Remove Background.** Cloud services behind a
+  modal UI; not reachable from a plugin without a human in the loop, and not
+  something to expose to a plan.
+- **PDF, print, export presets.** Photoshop's own dialogs.
+- **Vector paths, shapes, artboards, video, 3D, actions, batch.** Vastly larger
+  surfaces, each of which would need the descriptor path that does not work here.
+
+The honest summary: this is a layout-and-type tool for existing artwork, not a
+Photoshop replacement. That is a defensible product; a tool that claims to do the
+rest and silently does nothing is not.
+
+---
+
 ## Known limitations
 
 Stated plainly, because they are the things most likely to surprise.
 
-1. **The UXP plugin has not been executed against a real Photoshop build in this
-   environment.** The code follows the documented API and is defensive about the
-   parts that vary by build (`bounds` shapes, `LayerKind` enums, `translate` /
-   `scale` fallbacks), and the contract tests check it statically. **Expect to
-   fix something on first run.** The likely candidates are enumerated in
-   `photoshop-plugin/lib/ps.js` where a fallback exists.
-2. **The deterministic planner does not synthesise repairs.** With
+1. **The deterministic planner does not synthesise repairs.** With
    `AI_PLANNER_PROVIDER=mock` the repair loop is exercised but declines to fix
-   anything it cannot derive mechanically from the verification report. Repairs
-   are useful with a real provider.
-3. **`resize_canvas` does not scale content.** That is correct Photoshop
+anything it cannot derive mechanically from the verification report. Repairs are
+useful with a real provider.
+2. **`resize_canvas` does not scale content.** That is correct Photoshop
    behaviour; the planner is responsible for follow-up `move_layer` /
    `resize_layer` steps, and the bundled deterministic planner does that.
-4. **No "selected layer" concept.** "Set opacity to 70%" needs a target. The
+3. **No "selected layer" concept.** "Set opacity to 70%" needs a target. The
    bundled planner resolves it from a named layer or, for a single-layer
-   document, from the only layer.
-5. **The mock adapter writes a JSON placeholder for `.psd` and `.jpg`.** PNG is
+document, from the only layer.
+4. **The mock adapter writes a JSON placeholder for `.psd` and `.jpg`.** PNG is
    real. Files are real; PSD/JPEG bytes are not. `file_exists` verification is
-   therefore honest, but do not open a mock `.jpg` in Photoshop.
-6. **`ws://localhost` is verified on Windows only.** macOS ATS may require a TLS
+therefore honest, but do not open a mock `.jpg` in Photoshop.
+5. **`ws://localhost` is verified on Windows only.** macOS ATS may require a TLS
    tunnel in front of `PLUGIN_PORT`.
-7. **Text colour is read back with `batchPlay`,** because the UXP DOM does not
-   expose a reliable text-colour getter. Verification of `set_text_color`
-   therefore depends on that descriptor.
-8. **`manifestVersion: 6` is not used.** Photoshop documents v4 and v5; there is
+6. **A created document cannot be named.** `Document.name` is a getter on 26.11,
+   so `create_document` reports the name Photoshop gave it.
+7. **`characterStyle.underline` has no plain "on"** in this build — the enum holds
+   only the vertical-text variants. `set_text_style` applies the closest one and
+   the capability report says so.
+8. **Geometry operations change the selection.** `Layer.translate` /
+   `Layer.scale` / `Layer.translate` for masks and smart objects all act on the
+   active layer, so the plugin selects the target first. A user watching the
+   document will see the selection move.
+9. **`manifestVersion: 6` is not used.** Photoshop documents v4 and v5; there is
    no Photoshop documentation for v6.
 
 ---

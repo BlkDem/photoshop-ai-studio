@@ -35,9 +35,9 @@ DEST="C:\\Users\\${WIN_USER}\\photoshop-ai-studio"
 
 # Probes and scratch files this debugging leaves in data/; they are not source.
 SCRATCH=(
+  '.env'
   '*.pid' 'probe-args.json' 'run29.json' 'probes.jsonl' 'caps.json' 'a.json'
-  'mv.jsonl' 'mv2.jsonl' 'crop.jsonl' 'place.jsonl' 'lifecycle.jsonl'
-  'phase23.jsonl' 'demo-body.json' 'demo29.json' 'demo-run.txt'
+  '*.jsonl' 'demo-body.json' 'demo29.json' 'demo-run.txt'
 )
 
 # Probed through PowerShell: a Windows path is not a path bash can stat.

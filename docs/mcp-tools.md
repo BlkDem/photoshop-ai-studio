@@ -9,6 +9,24 @@
 **Naming** every tool is `photoshop.<operation>`. Dots are explicitly allowed by the
 MCP tools specification.
 
+## Before you plan: `get_capabilities`
+
+`photoshop.get_capabilities` reports what the connected Photoshop will actually
+perform, and it is worth calling before any plan that depends on a feature
+outside the everyday set. It separates:
+
+- `api` — the entry point exists in the live DOM;
+- `usable` — this plugin has performed it on this build and watched it take
+  effect;
+- `note` — why not, when there is something to say.
+
+The distinction is the whole point. `Layer.translate` *exists* and does nothing;
+`placeEvent` exists and refuses every file the plugin can write; `crop` is
+refused outright. A tool surface planned from the API reference is a tool surface
+full of silent no-ops.
+
+It is non-destructive and answers with no document open.
+
 ## Conventions
 
 These hold for all 30 tools:
@@ -63,6 +81,8 @@ plausibly succeed; `false` means stop and tell the user.
 | `FONT_NOT_AVAILABLE` | yes | The requested PostScript font name is not installed. |
 | `INVALID_COLOR` | no | Colour was neither `{r,g,b}` with 0..255 channels nor `"#rrggbb"`. |
 | `PATH_NOT_ALLOWED` | no | The path resolves outside the configured workspace. |
+| `WORKSPACE_NOT_GRANTED` | yes | The plugin has not been granted the workspace folder. Only `place_image` hits this, and only when the bytes were not sent. |
+| `UNSUPPORTED_OPERATION` | no | The host cannot do this at all — see the platform boundary in `architecture.md`. |
 | `FILE_NOT_FOUND` | yes | The referenced file does not exist inside the workspace. |
 | `FILE_EXISTS` | yes | The destination exists; pass `overwrite: true` to replace it. |
 | `EXPORT_FAILED` | yes | Photoshop could not write the file. |
