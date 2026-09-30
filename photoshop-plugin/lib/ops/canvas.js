@@ -283,17 +283,12 @@ function setSelection(ctx) {
 /**
  * `crop_document` — discards everything outside the given rectangle.
  *
- * There is no working implementation of this on Photoshop 26.11 / UXP 9.0.2.
- * Every form of the `crop` descriptor was tried — `ordinal/targetEnum` and
- * `_id`, with and without `_options`, with and without pixel units — and each
- * was refused with a modal program error, or left the bridge waiting until the
- * watchdog fired. ExtendScript performs the same crop happily through COM, so
- * this is a UXP gap rather than a document problem.
- *
- * Saying so is better than letting Photoshop answer "The user cancelled the
- * operation", which sends the planner off to repair a cancellation that nobody
- * performed. `resize_canvas` covers the common intent — changing the canvas
- * while keeping content — and works.
+ * This is here at all because the DOM has `document.crop(bounds)`. The descriptor
+ * route — which is what the API reference offers first — is refused outright on
+ * 26.11 ("The user cancelled the operation") for every form tried, and the
+ * conclusion drawn from that was that cropping was impossible. It was the
+ * descriptor that was broken, not the capability. See the platform boundary in
+ * `docs/architecture.md`.
  */
 function cropDocument(ctx) {
   var doc = ps.resolveDocument(ctx.params.documentId);
@@ -312,15 +307,114 @@ function cropDocument(ctx) {
     throw StudioError('INVALID_PARAMS', 'The crop rectangle covers the whole canvas; nothing to do.');
   }
 
-  throw StudioError(
-    'UNSUPPORTED_OPERATION',
-    'This Photoshop build refuses every form of the crop command, so pixels cannot be discarded. ' +
-      'Use resize_canvas to change the canvas while keeping content.',
-    { recoverable: false, details: { document: doc.name, crop: { x: x, y: y, width: w, height: h } } },
-  );
+  var cropped;
+  try {
+    // A bounds object, the same shape `selection.selectRectangle` takes.
+    cropped = doc.crop({ left: x, top: y, right: x + w, bottom: y + h });
+  } catch (err) {
+    throw StudioError('STEP_FAILED', 'Photoshop would not crop the document: ' + ((err && err.message) || String(err)), {
+      recoverable: true,
+    });
+  }
+
+  return Promise.resolve(cropped).then(function (doc2) {
+    var info = ps.documentInfo(doc2 || doc);
+    if (info.width !== w || info.height !== h) {
+      throw StudioError(
+        'STEP_FAILED',
+        'Photoshop reports the canvas as ' + info.width + '×' + info.height + ' after cropping to ' + w + '×' + h + '.',
+        { recoverable: true, details: { expected: { width: w, height: h }, actual: { width: info.width, height: info.height } } },
+      );
+    }
+    return info;
+  });
 }
 
+/** `trim_document` — crop the canvas to the content. */
+function trimDocument(ctx) {
+  var doc = ps.resolveDocument(ctx.params.documentId);
+  var type = require('./filters.js').TRIM_TYPE[ctx.params.type] || ctx.params.type || 'transparent';
 
+  var trimmed;
+  try {
+    trimmed = doc.trim(type);
+  } catch (err) {
+    throw StudioError('STEP_FAILED', 'Photoshop would not trim the document: ' + ((err && err.message) || String(err)), {
+      recoverable: true,
+    });
+  }
+  return Promise.resolve(trimmed).then(function (doc2) {
+    return ps.documentInfo(doc2 || doc);
+  });
+}
+
+/** `flatten_document` */
+function flattenDocument(ctx) {
+  var doc = ps.resolveDocument(ctx.params.documentId);
+  var flattened;
+  try {
+    flattened = doc.flatten();
+  } catch (err) {
+    throw StudioError('STEP_FAILED', 'Photoshop would not flatten the document: ' + ((err && err.message) || String(err)), {
+      recoverable: true,
+    });
+  }
+  return Promise.resolve(flattened).then(function (doc2) {
+    var info = ps.documentInfo(doc2 || doc);
+    info.layers = ps.flattenLayers(doc2 || doc);
+    return info;
+  });
+}
+
+/** `merge_visible_layers` */
+function mergeVisibleLayers(ctx) {
+  var doc = ps.resolveDocument(ctx.params.documentId);
+  var merged;
+  try {
+    merged = doc.mergeVisibleLayers();
+  } catch (err) {
+    throw StudioError(
+      'STEP_FAILED',
+      'Photoshop would not merge the visible layers: ' + ((err && err.message) || String(err)),
+      { recoverable: true },
+    );
+  }
+  return Promise.resolve(merged).then(function (doc2) {
+    var info = ps.documentInfo(doc2 || doc);
+    info.layers = ps.flattenLayers(doc2 || doc);
+    return info;
+  });
+}
+
+/** `convert_color_mode` */
+function convertColorMode(ctx) {
+  var doc = ps.resolveDocument(ctx.params.documentId);
+  var wanted = require('./filters.js').COLOR_MODE[ctx.params.mode] || ctx.params.mode;
+
+  var converted;
+  try {
+    converted = doc.changeMode(wanted);
+  } catch (err) {
+    throw StudioError(
+      'STEP_FAILED',
+      'Photoshop would not convert the document to ' + ctx.params.mode + ': ' + ((err && err.message) || String(err)),
+      { recoverable: true },
+    );
+  }
+  return Promise.resolve(converted).then(function (doc2) {
+    var info = ps.documentInfo(doc2 || doc);
+    // `changeMode` resolves without error and without converting often enough
+    // that the result has to be checked.
+    if (String(info.colorMode).toUpperCase() !== String(ctx.params.mode).toUpperCase()) {
+      throw StudioError(
+        'STEP_FAILED',
+        'Photoshop reports the colour mode as ' + info.colorMode + ' after asking for ' + ctx.params.mode + '.',
+        { recoverable: true, details: { requested: ctx.params.mode, actual: info.colorMode } },
+      );
+    }
+    return info;
+  });
+}
 
 module.exports = {
   set_selection: setSelection,
@@ -335,4 +429,9 @@ module.exports = {
   duplicate_document: duplicateDocument,
   resize_canvas: resizeCanvas,
   crop_document: cropDocument,
+  trim_document: trimDocument,
+  flatten_document: flattenDocument,
+  merge_visible_layers: mergeVisibleLayers,
+  convert_color_mode: convertColorMode,
+  sample_color: require('./filters.js').sample_color,
 };

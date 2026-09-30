@@ -56,8 +56,28 @@ describe('operation registry', () => {
 
   it('marks exactly the destructive tools', () => {
     const destructive = TOOL_META.filter((t) => t.destructive).map((t) => t.op).sort();
+    // Listed rather than derived: a tool that gains `destructive` by accident
+    // should fail here, and one that loses it should too. The destructive set is
+    // a safety decision, not an implementation detail.
     expect(destructive).toEqual(
-      ['close_document', 'crop_document', 'delete_layer', 'export_document', 'export_jpg', 'export_png', 'save_document', 'save_psd'].sort(),
+      [
+        'apply_filter',
+        'close_document',
+        'convert_color_mode',
+        'crop_document',
+        'delete_layer',
+        'export_document',
+        'export_jpg',
+        'export_png',
+        'flatten_document',
+        'flip_layer',
+        'merge_visible_layers',
+        'rasterize_layer',
+        'rotate_layer',
+        'save_document',
+        'save_psd',
+        'trim_document',
+      ].sort(),
     );
   });
 

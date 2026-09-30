@@ -406,62 +406,89 @@ That is the test of whether this architecture is doing its job.
 
 ---
 
-## Platform boundary: what UXP will and will not do
+## Platform boundary: read the DOM, not the reference
 
-The tool surface is not a matter of taste. It is bounded by what Photoshop 26.11
-/ UXP 9.0.2 will actually perform, and the boundary is not where the API
-reference says it is.
+The tool surface is bounded by what Photoshop 26.11 / UXP 9.0.2 will actually
+perform — and the bound is not where the API reference puts it.
 
-**Everything reachable through the UXP DOM works**, with two rules learned on
-device: geometry and style methods act on the **active** layer, so they must
-select it first; and several of them return without error while doing nothing, so
-a result has to be read back before it is reported.
+**Almost everything is reachable through the UXP DOM.** `get_capabilities` reads
+the live objects to find out what, and the surface is far larger than the API
+reference suggests: `document.crop`, `trim`, `flatten`, `mergeVisibleLayers`,
+`splitChannels`, `calculations`, `changeMode`, `convertProfile`, `sampleColor`,
+`suspendHistory`, `createPixelLayer`, `duplicateLayers`, `guides`, `artboards`,
+`layerComps`, `pathItems`; about thirty-five `Layer.apply*` filters,
+`rasterize`, `flip`, `rotate`, `skew`, `applyImage`, `merge`, `clear`, `trim`,
+`setLocking`, mask density and feather, layer linking; a `Selection` with
+`grow`, `expand`, `contract`, `smooth`, `selectBorder`; a `TextItem` with
+`warpStyle`, `convertToShape`, and a `characterStyle` carrying more than thirty
+properties.
 
-**Nothing that requires `batchPlay` can be relied on.** Five attempts, five
-different failures, none reported as an error:
+**`batchPlay` is the last resort, and on this build it does not work.** Every
+descriptor tried was accepted without error and did nothing, was refused, or hung:
 
 | Attempted | Outcome |
 |---|---|
-| `crop` (discard pixels outside a rect) | refused: "The user cancelled the operation" |
+| `crop` (descriptor) | refused: "The user cancelled the operation" |
 | `transform` (offset, scale) | every form accepted; the layer never moved |
 | `textStyleRange` / `set` | accepted; opened a modal dialog that wedged the plugin |
 | `make` (layer mask) | accepted; no mask appeared |
 | `make` (adjustment layer) | accepted; the layer stack came back *different* |
 
-`batchPlay` resolving is not evidence that anything happened. The adjustment case
-is the important one: verification failed *and the document was left altered*, so
-even "check afterwards and fail" is not a safe pattern here. This is why no
-operation in this codebase is built on a descriptor when the DOM has no
-equivalent, and why `photoshop.get_capabilities` reports `api` separately from
-`usable` — the API reference is a list of things that exist, not a list of things
-that work.
+`batchPlay` resolving is not evidence that anything happened, and the adjustment
+case shows that checking afterwards and failing is not a safe pattern either — the
+document was left altered.
+
+### A correction worth recording
+
+An earlier version of this document concluded from the table above that masks,
+adjustment layers, channels and cropping were *unreachable on Photoshop 26.11*.
+That was wrong, and wrong in the useful direction: `document.crop` is on the DOM
+and works, and so is everything else in the list above. The descriptors were
+broken; the features mostly were not. The mistake was inferring the size of the
+DOM from a handful of hand-picked property checks, and treating a failed
+descriptor as a missing feature.
+
+The rules that came out of it, which are what the code now follows:
+
+- **Enumerate, do not guess.** `get_capabilities` is built from the live objects.
+  Anything added later starts there.
+- **DOM first, descriptors only for what the DOM genuinely lacks.** And on this
+  build, that set is: mask creation, smart objects, adjustment layers.
+- **Read the result back.** Several DOM methods return normally having done
+  nothing, and one (`document.changeMode`) reports a result the document does not
+  have. Every mutating tool verifies and refuses if the value did not land.
+- **Select the layer first.** `translate`, `scale`, `flip`, `rotate` and the
+  filters act on the *active* layer. A user watching the document sees the
+  selection move.
 
 ### Consequences for coverage
 
-Reachable and implemented: documents (create/read/duplicate/save/close/list),
-layers (create/delete/rename/reorder/group/move/scale/visibility/opacity/blend
-mode/fill opacity), text (create/read/update/position/size/colour/style patch),
-images (place, resize), canvas (resize, selection), export (PNG/JPG/PSD, preview).
+Implemented: documents (create, read, duplicate, save, close, list, crop, trim,
+flatten, merge visible, colour-mode conversion, colour sampling); layers (create,
+delete, rename, reorder, group, move, scale, flip, rotate, rasterize, visibility,
+opacity, blend mode, fill opacity, locking surface); text (create, read, update,
+position, size, colour, style patch); images (place, resize, twenty-five
+filters); canvas (resize, selection with grow/expand/contract/feather); export
+(PNG, JPG, PSD, preview).
 
 Deliberately absent, and why:
 
-- **Layer masks and smart objects.** No DOM equivalent, and `make` /
-  `convertToSmartObject` are among the failures above. A tool that reported a
-  mask it could not verify would be worse than no tool, and `convertToSmartObject`
-  wedged the bridge outright.
-- **Adjustment layers, channels, colour-mode conversion.** The same mechanism.
-- **History / undo.** The DOM exposes no history, and a descriptor-driven undo is
-  the same class of risk.
+- **Mask creation and smart objects.** No DOM equivalent, and `make` /
+  `convertToSmartObject` are among the failures above. A tool that reported a mask
+  it could not verify would be worse than no tool, and `convertToSmartObject` hung
+  the bridge outright. Mask *density* and *feather* are readable and settable, and
+  are exposed.
+- **Adjustment layers.** `make`, same reason.
 - **Generative Fill, Neural Filters, Remove Background.** Cloud services behind a
-  modal UI; not reachable from a plugin without a human in the loop, and not
-  something to expose to a plan.
+  modal UI; not reachable without a human in the loop, and not something to hand a
+  plan.
 - **PDF, print, export presets.** Photoshop's own dialogs.
-- **Vector paths, shapes, artboards, video, 3D, actions, batch.** Vastly larger
-  surfaces, each of which would need the descriptor path that does not work here.
+- **Vector paths, shapes, video, 3D, actions, batch.** Vastly larger surfaces, each
+  needing the descriptor path that does not work here.
 
-The honest summary: this is a layout-and-type tool for existing artwork, not a
-Photoshop replacement. That is a defensible product; a tool that claims to do the
-rest and silently does nothing is not.
+The honest summary: this is a capable layout, type and image-processing tool for
+existing artwork — not a Photoshop replacement. A tool that claimed the rest and
+silently did nothing would be worse.
 
 ---
 

@@ -401,6 +401,7 @@ module.exports = {
   set_layer_blend_mode: setLayerBlendMode,
   set_layer_fill_opacity: setLayerFillOpacity,
   mapBlendMode: mapBlendMode,
+  withActiveLayer: withActiveLayer,
   create_group: createGroup,
   move_layer_to_group: moveLayerToGroup,
   reorder_layer: reorderLayer,

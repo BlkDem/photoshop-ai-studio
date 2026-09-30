@@ -977,6 +977,30 @@ function num(value, fallback) {
   return isFinite(parsed) ? parsed : fallback;
 }
 
+/**
+ * Resolves a value against one of the `constants` enums.
+ *
+ * The DOM takes enum *values*, not the names this API uses, and the values are
+ * not the names lowercased: `Layer.translate` wants a `SelectionType` string,
+ * `applyAddNoise` wants a `NoiseDistribution` value, `Layer.flip` wants the axis
+ * spelled out. Hard-coding any of them is how `applyAddNoise` ends up reporting
+ * "Invalid constant. Expected 'gaussian' to be one of Constants.NoiseDistribution".
+ *
+ * Looked up rather than guessed, across the spellings a UXP build might use, and
+ * the raw value is returned only when the enum has no such member — in which case
+ * Photoshop's own error names the constant, which is the useful outcome.
+ */
+function enumValue(enumName, key, fallback) {
+  var table = constants && constants[enumName];
+  if (table) {
+    var spellings = [key, key.charAt(0).toUpperCase() + key.slice(1), key.toUpperCase()];
+    for (var i = 0; i < spellings.length; i += 1) {
+      if (typeof table[spellings[i]] !== 'undefined') return table[spellings[i]];
+    }
+  }
+  return fallback === undefined ? key : fallback;
+}
+
 function round(value, decimals) {
   if (typeof value !== 'number' || !isFinite(value)) return 0;
   var factor = Math.pow(10, decimals || 0);
@@ -1013,6 +1037,7 @@ module.exports = {
   layerObjects: layerObjects,
   layerInfo: layerInfo,
   mapLayerKind: mapLayerKind,
+  enumValue: enumValue,
   resolveCreatedLayer: resolveCreatedLayer,
   BATCH_TIMEOUT_MS: BATCH_TIMEOUT_MS,
   boundsOf: boundsOf,

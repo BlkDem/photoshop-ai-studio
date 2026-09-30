@@ -21,6 +21,7 @@ var layerOps = require('./ops/layers.js');
 var textOps = require('./ops/text.js');
 var imageOps = require('./ops/images.js');
 var capabilityOps = require('./ops/capabilities.js');
+var filterOps = require('./ops/filters.js');
 
 /** op name → (ctx) => Promise<result>. `ctx` is {params, config, documentId}. */
 var OPERATIONS = {
@@ -29,6 +30,15 @@ var OPERATIONS = {
   get_document_info: canvasOps.get_document_info,
   get_capabilities: capabilityOps.get_capabilities,
   set_selection: canvasOps.set_selection,
+  trim_document: canvasOps.trim_document,
+  flatten_document: canvasOps.flatten_document,
+  merge_visible_layers: canvasOps.merge_visible_layers,
+  convert_color_mode: canvasOps.convert_color_mode,
+  sample_color: canvasOps.sample_color,
+  apply_filter: filterOps.apply_filter,
+  flip_layer: filterOps.flip_layer,
+  rotate_layer: filterOps.rotate_layer,
+  rasterize_layer: filterOps.rasterize_layer,
   create_document: canvasOps.create_document,
   get_documents: canvasOps.get_documents,
   close_document: canvasOps.close_document,
@@ -173,6 +183,15 @@ function commandNameFor(op) {
     get_document_info: 'Read document info',
     get_capabilities: 'Read capabilities',
     set_selection: 'Set selection',
+    trim_document: 'Trim document',
+    flatten_document: 'Flatten document',
+    merge_visible_layers: 'Merge visible layers',
+    convert_color_mode: 'Convert colour mode',
+    sample_color: 'Sample colour',
+    apply_filter: 'Apply filter',
+    flip_layer: 'Flip layer',
+    rotate_layer: 'Rotate layer',
+    rasterize_layer: 'Rasterize layer',
     create_document: 'Create document',
     get_documents: 'Read documents',
     close_document: 'Close document',

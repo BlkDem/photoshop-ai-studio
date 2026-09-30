@@ -154,6 +154,42 @@ export class UxpRemoteAdapter implements PhotoshopAdapter {
     return (await this.send('set_text_style', params)) as ResultOf<'set_text_style'>;
   }
 
+  async applyFilter(params: ParamsOf<'apply_filter'>): Promise<ResultOf<'apply_filter'>> {
+    return (await this.send('apply_filter', params)) as ResultOf<'apply_filter'>;
+  }
+
+  async flipLayer(params: ParamsOf<'flip_layer'>): Promise<ResultOf<'flip_layer'>> {
+    return (await this.send('flip_layer', params)) as ResultOf<'flip_layer'>;
+  }
+
+  async rotateLayer(params: ParamsOf<'rotate_layer'>): Promise<ResultOf<'rotate_layer'>> {
+    return (await this.send('rotate_layer', params)) as ResultOf<'rotate_layer'>;
+  }
+
+  async rasterizeLayer(params: ParamsOf<'rasterize_layer'>): Promise<ResultOf<'rasterize_layer'>> {
+    return (await this.send('rasterize_layer', params)) as ResultOf<'rasterize_layer'>;
+  }
+
+  async sampleColor(params: ParamsOf<'sample_color'>): Promise<ResultOf<'sample_color'>> {
+    return (await this.send('sample_color', params)) as ResultOf<'sample_color'>;
+  }
+
+  async trimDocument(params: ParamsOf<'trim_document'>): Promise<ResultOf<'trim_document'>> {
+    return (await this.send('trim_document', params)) as ResultOf<'trim_document'>;
+  }
+
+  async flattenDocument(params: ParamsOf<'flatten_document'>): Promise<ResultOf<'flatten_document'>> {
+    return (await this.send('flatten_document', params)) as ResultOf<'flatten_document'>;
+  }
+
+  async mergeVisibleLayers(params: ParamsOf<'merge_visible_layers'>): Promise<ResultOf<'merge_visible_layers'>> {
+    return (await this.send('merge_visible_layers', params)) as ResultOf<'merge_visible_layers'>;
+  }
+
+  async convertColorMode(params: ParamsOf<'convert_color_mode'>): Promise<ResultOf<'convert_color_mode'>> {
+    return (await this.send('convert_color_mode', params)) as ResultOf<'convert_color_mode'>;
+  }
+
   async createDocument(params: ParamsOf<'create_document'>): Promise<ResultOf<'create_document'>> {
     return (await this.send('create_document', params)) as ResultOf<'create_document'>;
   }

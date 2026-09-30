@@ -21,6 +21,7 @@ import {
   type ParamsOf,
   type PhotoshopAdapter,
   type PreviewResult,
+  type SampleColorResult,
   type RgbColor,
   type SaveResult,
   type TextAlign,
@@ -270,6 +271,98 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
     }
     layer.fillOpacity = params.opacity;
     return { ...layer };
+  }
+
+  async applyFilter(params: ParamsOf<'apply_filter'>): Promise<LayerInfo> {
+    const { layer } = this.resolveLayer(params);
+    this.assertMutable(layer);
+    if (params.filter === 'flip' as never) throw new StudioException('UNSUPPORTED_OPERATION', 'nope');
+    // The mock records the request; it does not read pixels.
+    (layer as unknown as { appliedFilter?: string }).appliedFilter = params.filter;
+    return { ...layer } as LayerInfo;
+  }
+
+  async flipLayer(params: ParamsOf<'flip_layer'>): Promise<LayerInfo> {
+    const { layer } = this.resolveLayer(params);
+    this.assertMutable(layer);
+    if (params.direction === 'vertical') {
+      const { x, width } = layer;
+      layer.x = x + width;
+    }
+    return { ...layer };
+  }
+
+  async rotateLayer(params: ParamsOf<'rotate_layer'>): Promise<LayerInfo> {
+    const { layer } = this.resolveLayer(params);
+    this.assertMutable(layer);
+    const { width, height } = layer;
+    if (Math.abs(params.angle % 180) === 90) {
+      layer.x += Math.round((width - height) / 2);
+      layer.y += Math.round((height - width) / 2);
+      layer.width = height;
+      layer.height = width;
+    }
+    return { ...layer };
+  }
+
+  async rasterizeLayer(params: ParamsOf<'rasterize_layer'>): Promise<LayerInfo> {
+    const { layer } = this.resolveLayer(params);
+    this.assertMutable(layer);
+    return { ...layer, rasterized: true } as LayerInfo;
+  }
+
+  async sampleColor(params: ParamsOf<'sample_color'>): Promise<SampleColorResult> {
+    const doc = this.active();
+    if (params.x < 0 || params.y < 0 || params.x >= doc.width || params.y >= doc.height) {
+      throw new StudioException(
+        'INVALID_PARAMS',
+        `Cannot sample at (${params.x},${params.y}): the canvas is ${doc.width}x${doc.height}.`,
+      );
+    }
+    // Deterministic stand-in for reading a pixel; the mock has no raster.
+    const color = { r: (params.x * 7) % 256, g: (params.y * 5) % 256, b: 128 };
+    return { color, hex: `#${[color.r, color.g, color.b].map((c) => c.toString(16).padStart(2, '0')).join('')}` };
+  }
+
+  async trimDocument(params: ParamsOf<'trim_document'>): Promise<DocumentInfo> {
+    void params;
+    const doc = this.active();
+    const visible = doc.layers.filter((l) => l.visible);
+    if (!visible.length) return this.toInfo(doc);
+    const left = Math.min(...visible.map((l) => l.x));
+    const top = Math.min(...visible.map((l) => l.y));
+    const right = Math.max(...visible.map((l) => l.x + l.width));
+    const bottom = Math.max(...visible.map((l) => l.y + l.height));
+    for (const layer of visible) {
+      layer.x -= left;
+      layer.y -= top;
+    }
+    doc.width = right - left;
+    doc.height = bottom - top;
+    return this.toInfo(doc);
+  }
+
+  async flattenDocument(): Promise<DocumentInfo> {
+    const doc = this.active();
+    const visible = doc.layers.filter((l) => l.visible);
+    const top = visible[visible.length - 1];
+    doc.layers = visible.length ? [{ ...(top as LayerInfo), name: 'Background', isBackground: true }] : [];
+    return this.toInfo(doc);
+  }
+
+  async mergeVisibleLayers(): Promise<DocumentInfo> {
+    const doc = this.active();
+    const visible = doc.layers.filter((l) => l.visible);
+    const hidden = doc.layers.filter((l) => !l.visible);
+    const top = visible[visible.length - 1];
+    doc.layers = visible.length ? [{ ...(top as LayerInfo) }, ...hidden] : [];
+    return this.toInfo(doc);
+  }
+
+  async convertColorMode(params: ParamsOf<'convert_color_mode'>): Promise<DocumentInfo> {
+    const doc = this.active();
+    doc.colorMode = params.mode;
+    return this.toInfo(doc);
   }
 
   async setTextStyle(params: ParamsOf<'set_text_style'>): Promise<TextLayerInfo> {

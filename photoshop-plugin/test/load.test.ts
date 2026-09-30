@@ -632,3 +632,44 @@ describe('document lifecycle', () => {
     expect(ref.name).toBe('stub.psd');
   });
 });
+
+describe('DOM-backed operations, enumerated rather than assumed', () => {
+  /**
+   * The failure this whole area came from: a capability report built from a
+   * handful of hand-picked property checks, which concluded that masks, cropping
+   * and adjustment layers were unreachable on this build. They were not — the DOM
+   * has `document.crop`, `trim`, `flatten`, `sampleColor` and thirty-five layer
+   * filters, and all of them work. So the tool tables are checked against the
+   * registry rather than trusted.
+   */
+  it('routes every filter in the shared vocabulary to a Layer method', () => {
+    const filters = loadPluginFile(pluginRoot, 'lib/ops/filters.js') as { FILTERS: Record<string, unknown> };
+    const operations = readFileSync(resolvePath(join(pluginRoot, '..', 'shared', 'src', 'photoshop', 'operations.ts')), 'utf8');
+    const declared = [...operations.matchAll(/filter: z\.literal\('([a-zA-Z]+)'\)/g)].map((m) => m[1]);
+
+    expect(declared.length).toBeGreaterThan(20);
+    for (const name of declared) {
+      expect(typeof filters.FILTERS[name], `${name} is offered to the model but not implemented`).toBe('function');
+    }
+    // And nothing implemented that is not offered.
+    expect(Object.keys(filters.FILTERS).sort()).toEqual(declared.sort());
+  });
+
+  it('translates filter enums instead of guessing at their values', () => {
+    // `applyAddNoise` rejects 'gaussian' with "Invalid constant. Expected
+    // 'gaussian' to be one of Constants.NoiseDistribution", so the value has to
+    // come from the enum. Verified on device, so this guards the mechanism.
+    const ps = loadPluginFile(pluginRoot, 'lib/ps.js') as {
+      enumValue: (name: string, key: string) => unknown;
+      constants: Record<string, Record<string, string>>;
+    };
+    (ps as { constants: Record<string, Record<string, string>> }).constants.NoiseDistribution = {
+      GAUSSIAN: 'gaussianNormal',
+    };
+
+    expect(ps.enumValue('NoiseDistribution', 'gaussian')).toBe('gaussianNormal');
+    // An enum the build does not have falls back to the raw value, so Photoshop's
+    // own error names the constant rather than the plugin swallowing it.
+    expect(ps.enumValue('NoSuchEnum', 'whatever')).toBe('whatever');
+  });
+});

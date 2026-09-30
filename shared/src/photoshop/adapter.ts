@@ -2,7 +2,7 @@ import * as z from 'zod/v4';
 
 import type { DocumentInfo, DocumentRef, DocumentState, SaveResult } from './document.js';
 import type { DocumentListResult } from './operations.js';import type { LayerInfo, LayerSelector, LayerPosition } from './layer.js';
-import type { CapabilitiesResult, ExportResult, ExportFormat, ParamsOf, PreviewResult } from './operations.js';
+import type { CapabilitiesResult, ExportResult, ExportFormat, ParamsOf, PreviewResult, SampleColorResult } from './operations.js';
 import type { RgbColor, TextAlign, TextLayerInfo } from './text.js';
 /**
  * The Photoshop abstraction layer (brief §12).
@@ -49,6 +49,23 @@ export interface PhotoshopAdapter {
   setLayerBlendMode(params: ParamsOf<'set_layer_blend_mode'>): Promise<LayerInfo>;
   /** Fill opacity, which fades content without touching effects. */
   setLayerFillOpacity(params: ParamsOf<'set_layer_fill_opacity'>): Promise<LayerInfo>;
+  /*
+   * DOM-backed operations added after the capability report was rebuilt from the
+   * real `Layer` / `Document` surface rather than from the API reference: the
+   * filters, layer transforms, colour sampling, canvas trim and document finishing
+   * moves. All of them are on the DOM, which is why they work where the
+   * `batchPlay` descriptors do not.
+   */
+
+  applyFilter(params: ParamsOf<'apply_filter'>): Promise<LayerInfo>;
+  flipLayer(params: ParamsOf<'flip_layer'>): Promise<LayerInfo>;
+  rotateLayer(params: ParamsOf<'rotate_layer'>): Promise<LayerInfo>;
+  rasterizeLayer(params: ParamsOf<'rasterize_layer'>): Promise<LayerInfo>;
+  sampleColor(params: ParamsOf<'sample_color'>): Promise<SampleColorResult>;
+  trimDocument(params: ParamsOf<'trim_document'>): Promise<DocumentInfo>;
+  flattenDocument(params: ParamsOf<'flatten_document'>): Promise<DocumentInfo>;
+  mergeVisibleLayers(params: ParamsOf<'merge_visible_layers'>): Promise<DocumentInfo>;
+  convertColorMode(params: ParamsOf<'convert_color_mode'>): Promise<DocumentInfo>;
   /** Character and paragraph properties, applied as a patch. */
   setTextStyle(params: ParamsOf<'set_text_style'>): Promise<TextLayerInfo>;
   /** A new empty document, which becomes the active one. */

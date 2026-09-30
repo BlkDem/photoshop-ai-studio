@@ -62,10 +62,21 @@ export const OPERATION_NAMES = [
   // images
   'place_image',
   'resize_layer',
+  'apply_filter',
+  // layers: transforms and finishing
+  'flip_layer',
+  'rotate_layer',
+  'rasterize_layer',
   // canvas
   'set_selection',
   'resize_canvas',
   'crop_document',
+  'trim_document',
+  // document
+  'sample_color',
+  'flatten_document',
+  'merge_visible_layers',
+  'convert_color_mode',
   // export
   'export_document',
   'export_png',
@@ -157,6 +168,13 @@ export const CapabilitiesResultSchema = z.object({
 export type CapabilityEntry = z.infer<typeof CapabilityEntrySchema>;
 export type CapabilitiesResult = z.infer<typeof CapabilitiesResultSchema>;
 
+/** What `sample_color` found, in both forms a caller might want. */
+export const SampleColorResultSchema = z.object({
+  color: RgbColorSchema,
+  hex: z.string(),
+});
+export type SampleColorResult = z.infer<typeof SampleColorResultSchema>;
+
 /**
  * A file Photoshop wrote inside its own sandbox, awaiting publication.
  *
@@ -234,6 +252,54 @@ export interface OperationDefinition {
 }
 
 type OperationDefinitionMap = { readonly [K in PhotoshopOpName]: OperationDefinition };
+
+/**
+ * The filters a layer can take, with each one's own parameters.
+ *
+ * A discriminated union rather than one object with every field optional,
+ * because "blur with a radius" and "unsharp mask with three numbers" are
+ * different operations and a model should not have to remember which fields go
+ * with which name. The plugin maps each to the matching `Layer.apply*` method.
+ */
+/** Each filter's own parameters; the union is built from these. */
+export const FILTER_PARAM_SHAPES = [
+  z.object({filter: z.literal('gaussianBlur'), radius: z.number().min(0.1).max(250).default(4)}),
+  z.object({filter: z.literal('smartBlur'), radius: z.number().min(0.1).max(100).default(5), threshold: z.number().min(0.1).max(100).default(10), quality: z.enum(['low', 'medium', 'high']).default('medium')}),
+  z.object({filter: z.literal('motionBlur'), angle: z.number().min(-180).max(180).default(0), distance: z.number().min(1).max(200).default(20)}),
+  z.object({filter: z.literal('radialBlur'), amount: z.number().min(1).max(100).default(10), type: z.enum(['spin', 'zoom']).default('zoom')}),
+  z.object({filter: z.literal('unsharpMask'), amount: z.number().min(1).max(500).default(100), radius: z.number().min(0.1).max(50).default(1), threshold: z.number().int().min(0).max(255).default(0)}),
+  z.object({filter: z.literal('sharpen')}),
+  z.object({filter: z.literal('sharpenMore')}),
+  z.object({filter: z.literal('sharpenEdges')}),
+  z.object({filter: z.literal('addNoise'), amount: z.number().min(1).max(100).default(10), distribution: z.enum(['uniform', 'gaussian']).default('gaussian'), monochromatic: z.boolean().default(true)}),
+  z.object({filter: z.literal('medianNoise'), radius: z.number().int().min(1).max(100).default(4)}),
+  z.object({filter: z.literal('dustAndScratches'), radius: z.number().int().min(1).max(100).default(2), threshold: z.number().int().min(0).max(255).default(10)}),
+  z.object({filter: z.literal('despeckle')}),
+  z.object({filter: z.literal('speckle'), radius: z.number().int().min(1).max(100).default(50), amount: z.number().int().min(1).max(100).default(4)}),
+  z.object({filter: z.literal('highPass'), radius: z.number().min(0.1).max(250).default(2)}),
+  z.object({filter: z.literal('offset'), horizontal: z.number().int().min(-1000).max(1000).default(0), vertical: z.number().int().min(-1000).max(1000).default(0)}),
+  z.object({filter: z.literal('twirl'), angle: z.number().min(-999).max(999).default(90)}),
+  z.object({filter: z.literal('spherize'), amount: z.number().min(-100).max(100).default(50)}),
+  z.object({filter: z.literal('ripple'), amount: z.number().int().min(-100).max(100).default(50)}),
+  z.object({filter: z.literal('pinch'), amount: z.number().min(-100).max(100).default(50)}),
+  z.object({filter: z.literal('zigZag'), amount: z.number().int().min(1).max(100).default(25), style: z.enum(['aroundCenter', 'outFromCenter']).default('aroundCenter')}),
+  z.object({filter: z.literal('wave'), amplitude: z.number().int().min(1).max(100).default(25), wavelength: z.number().int().min(4).max(350).default(70)}),
+  z.object({filter: z.literal('shear'), degrees: z.number().min(-90).max(90).default(0)}),
+  z.object({filter: z.literal('diffuseGlow'), amount: z.number().min(1).max(100).default(10), threshold: z.number().int().min(0).max(255).default(0)}),
+  z.object({filter: z.literal('maximum'), radius: z.number().int().min(1).max(100).default(1)}),
+  z.object({filter: z.literal('minimum'), radius: z.number().int().min(1).max(100).default(1)}),
+] as const;
+
+export const FilterParamsSchema = z.discriminatedUnion('filter', FILTER_PARAM_SHAPES);
+export type FilterParams = z.infer<typeof FilterParamsSchema>;
+
+/** The filters this build is known to apply, for the capability report. */
+export const FILTER_NAMES = [
+  'gaussianBlur', 'smartBlur', 'motionBlur', 'radialBlur', 'unsharpMask', 'sharpen', 'sharpenMore',
+  'sharpenEdges', 'addNoise', 'medianNoise', 'dustAndScratches', 'despeckle', 'speckle', 'highPass',
+  'offset', 'twirl', 'spherize', 'ripple', 'pinch', 'zigZag', 'wave', 'shear', 'diffuseGlow',
+  'maximum', 'minimum',
+] as const;
 
 /**
  * Character and paragraph settings a text layer carries.
@@ -716,6 +782,137 @@ export const OPERATIONS = {
   },
 
   // ---------------------------------------------------------------- canvas
+  apply_filter: {
+    tool: 'photoshop.apply_filter',
+    title: 'Apply Filter',
+    description:
+      'Apply a filter to a layer, destructively. Twenty-five filters, all on the DOM and all ' +
+      'exercised against a real Photoshop. Two consequences worth knowing: a filter applied to ' +
+      'a text or shape layer rasterizes it, so later text edits are no longer possible on ' +
+      'that layer; and nothing here is undoable, because the plugin has no history tool. ' +
+      'Work on a duplicate if the layer matters.',
+    category: 'image',
+    destructive: true,
+    requiresConfirmation: true,
+    // `.merge` rather than `.extend`: the array holds whole ZodObjects, one per
+    // filter variant, and only merge composes two schemas.
+    params: z.union(
+      FILTER_PARAM_SHAPES.map((variant) => LayerSelectorSchema.merge(variant).extend({ documentId: z.string().min(1).default('active') })),
+    ),
+    result: LayerInfoSchema,
+  },
+  flip_layer: {
+    tool: 'photoshop.flip_layer',
+    title: 'Flip Layer',
+    description: 'Mirror a layer horizontally or vertically. Destructive; no undo.',
+    category: 'layer',
+    destructive: true,
+    requiresConfirmation: true,
+    params: LayerSelectorSchema.extend({
+      direction: z.enum(['horizontal', 'vertical']).default('horizontal'),
+    }),
+    result: LayerInfoSchema,
+  },
+  rotate_layer: {
+    tool: 'photoshop.rotate_layer',
+    title: 'Rotate Layer',
+    description:
+      "Rotate a layer's content about its centre, in degrees clockwise. `interpolation` maps to " +
+      'Photoshop\'s own setting: `nearestNeighbor` keeps hard edges, `bilinear` is the default, ' +
+      '`bicubic` is smoothest. Destructive; no undo.',
+    category: 'layer',
+    destructive: true,
+    requiresConfirmation: true,
+    params: LayerSelectorSchema.extend({
+      angle: z.number().min(-360).max(360).default(90),
+      interpolation: z.enum(['nearestNeighbor', 'bilinear', 'bicubic']).default('bilinear'),
+    }),
+    result: LayerInfoSchema,
+  },
+  rasterize_layer: {
+    tool: 'photoshop.rasterize_layer',
+    title: 'Rasterize Layer',
+    description:
+      'Flatten a layer\'s live effects into its pixels. Irreversible, and the reason it is ' +
+      'gated: after rasterizing there is no way to lower the opacity of an effect ' +
+      'independently. Only useful as a deliberate final step.',
+    category: 'layer',
+    destructive: true,
+    requiresConfirmation: true,
+    params: LayerSelectorSchema,
+    result: LayerInfoSchema,
+  },
+  trim_document: {
+    tool: 'photoshop.trim_document',
+    title: 'Trim Document',
+    description:
+      'Crop the canvas to the content, discarding the transparent margin. `type` mirrors ' +
+      "Photoshop's own: transparent pixels, or the colour in the corner.",
+    category: 'canvas',
+    destructive: true,
+    requiresConfirmation: true,
+    params: DocumentTargetSchema.extend({
+      type: z.enum(['transparent', 'topLeftColor', 'bottomRightColor']).default('transparent'),
+    }),
+    result: DocumentInfoSchema,
+  },
+  sample_color: {
+    tool: 'photoshop.sample_color',
+    title: 'Sample Colour',
+    description:
+      'Read the colour at a point in the document. The way to pick up a brand colour from an ' +
+      'existing asset without guessing it. `radius` averages over a square, which is what you ' +
+      'want for a gradient or a photo.',
+    category: 'document',
+    destructive: false,
+    requiresConfirmation: false,
+    params: DocumentTargetSchema.extend({
+      x: z.number().int().min(0),
+      y: z.number().int().min(0),
+      radius: z.number().int().min(0).max(100).default(0),
+    }),
+    result: z.object({
+      color: RgbColorSchema,
+      hex: z.string(),
+    }),
+  },
+  flatten_document: {
+    tool: 'photoshop.flatten_document',
+    title: 'Flatten Document',
+    description:
+      'Merge every visible layer into one, discarding hidden layers. Irreversible, and the ' +
+      'single most destructive thing in this tool surface.',
+    category: 'document',
+    destructive: true,
+    requiresConfirmation: true,
+    params: DocumentTargetSchema,
+    result: DocumentInfoSchema,
+  },
+  merge_visible_layers: {
+    tool: 'photoshop.merge_visible_layers',
+    title: 'Merge Visible Layers',
+    description: 'Merge the visible layers into one, keeping hidden layers. Irreversible.',
+    category: 'document',
+    destructive: true,
+    requiresConfirmation: true,
+    params: DocumentTargetSchema,
+    result: DocumentInfoSchema,
+  },
+  convert_color_mode: {
+    tool: 'photoshop.convert_color_mode',
+    title: 'Convert Colour Mode',
+    description:
+      "Convert the document between RGB, CMYK, Gray and Lab. Irreversible from the user's " +
+      'point of view once saved, and it changes every colour in the document — a conversion ' +
+      'to CMYK will visibly shift a web palette.',
+    category: 'document',
+    destructive: true,
+    requiresConfirmation: true,
+    params: DocumentTargetSchema.extend({
+      mode: z.enum(['RGB', 'CMYK', 'GRAYSCALE', 'LAB', 'BITMAP']),
+    }),
+    result: DocumentInfoSchema,
+  },
   set_selection: {
     tool: 'photoshop.set_selection',
     title: 'Set Selection',
