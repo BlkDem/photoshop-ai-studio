@@ -10,7 +10,7 @@ import {
   TextAlignSchema,
   TextLayerInfoSchema,
 } from './text.js';
-import { ElementPlacementSchema, LayerInfoSchema, LayerSelectorSchema } from './layer.js';
+import { BlendModeSchema, ElementPlacementSchema, LayerInfoSchema, LayerSelectorSchema } from './layer.js';
 
 /**
  * The single registry that drives everything:
@@ -40,6 +40,8 @@ export const OPERATION_NAMES = [
   // layers
   'get_layers',
   'get_layer',
+  'set_layer_blend_mode',
+  'set_layer_fill_opacity',
   'create_layer',
   'delete_layer',
   'rename_layer',
@@ -51,6 +53,7 @@ export const OPERATION_NAMES = [
   'reorder_layer',
   // text
   'create_text_layer',
+  'set_text_style',
   'get_text_layer',
   'update_text_layer',
   'set_text_position',
@@ -60,6 +63,7 @@ export const OPERATION_NAMES = [
   'place_image',
   'resize_layer',
   // canvas
+  'set_selection',
   'resize_canvas',
   'crop_document',
   // export
@@ -230,6 +234,32 @@ export interface OperationDefinition {
 }
 
 type OperationDefinitionMap = { readonly [K in PhotoshopOpName]: OperationDefinition };
+
+/**
+ * Character and paragraph settings a text layer carries.
+ *
+ * Grouped into one tool rather than six because they are always edited together
+ * ("make it a condensed italic") and each is a single property on the same
+ * object. Every field is optional; an absent one is left alone.
+ */
+export const TextStylePatchSchema = z.object({
+  /** Letter spacing, in 1/1000 em — Photoshop's own unit, not points. */
+  tracking: z.number().int().min(-5000).max(5000).optional(),
+  /** Line spacing as a percentage of the font size. */
+  leading: z.number().int().min(0).max(5000).optional(),
+  fauxBold: z.boolean().optional(),
+  fauxItalic: z.boolean().optional(),
+  underline: z.boolean().optional(),
+  strikethrough: z.boolean().optional(),
+  /** Vertical offset, in the same 1/1000 em unit as tracking. */
+  baselineShift: z.number().int().min(-1000).max(1000).optional(),
+  /** Horizontal scale, percent. */
+  horizontalScale: z.number().int().min(10).max(1000).optional(),
+  verticalScale: z.number().int().min(10).max(1000).optional(),
+  /** Convert the layer to point text and set the wrap width, in pixels. */
+  paragraphWidth: z.number().int().positive().max(20000).optional(),
+});
+export type TextStylePatch = z.infer<typeof TextStylePatchSchema>;
 
 export const OPERATIONS = {
   // -------------------------------------------------------------- document
@@ -455,6 +485,32 @@ export const OPERATIONS = {
     }),
     result: LayerInfoSchema,
   },
+  set_layer_blend_mode: {
+    tool: 'photoshop.set_layer_blend_mode',
+    title: 'Set Layer Blend Mode',
+    description:
+      "Set how a layer combines with what is beneath it. The names are the DOM's, not the " +
+      "Photoshop UI's: `colorDodge` is Colour Dodge, `softLight` is Soft Light.",
+    category: 'layer',
+    destructive: false,
+    requiresConfirmation: false,
+    params: LayerSelectorSchema.extend({ mode: BlendModeSchema }),
+    result: LayerInfoSchema,
+  },
+  set_layer_fill_opacity: {
+    tool: 'photoshop.set_layer_fill_opacity',
+    title: 'Set Layer Fill Opacity',
+    description:
+      'Set fill opacity (0-100), which fades the layer content without touching a mask or ' +
+      'an opacity that would also fade any layer effects. Distinct from `set_layer_opacity`.',
+    category: 'layer',
+    destructive: false,
+    requiresConfirmation: false,
+    params: LayerSelectorSchema.extend({
+      opacity: z.number().int().min(0).max(100),
+    }),
+    result: LayerInfoSchema,
+  },
   set_layer_opacity: {
     tool: 'photoshop.set_layer_opacity',
     title: 'Set Layer Opacity',
@@ -565,6 +621,20 @@ export const OPERATIONS = {
     }),
     result: TextLayerInfoSchema,
   },
+  set_text_style: {
+    tool: 'photoshop.set_text_style',
+    title: 'Set Text Style',
+    description:
+      'Set character and paragraph properties on a text layer: tracking, leading, faux bold and ' +
+      'italic, underline, strikethrough, baseline shift, scale, and the paragraph wrap width. ' +
+      'Only the fields you pass are changed. Prefer this over several one-property tools — a ' +
+      "caption is usually 'condensed and italic', not two separate intents.",
+    category: 'text',
+    destructive: false,
+    requiresConfirmation: false,
+    params: LayerSelectorSchema.extend(TextStylePatchSchema.shape),
+    result: TextLayerInfoSchema,
+  },
   set_text_position: {
     tool: 'photoshop.set_text_position',
     title: 'Set Text Position',
@@ -646,6 +716,28 @@ export const OPERATIONS = {
   },
 
   // ---------------------------------------------------------------- canvas
+  set_selection: {
+    tool: 'photoshop.set_selection',
+    title: 'Set Selection',
+    description:
+      'Change the active selection. `mode` is `all`, `rectangle`, `ellipse`, `none` or ' +
+      '`invert`; a rectangle/ellipse takes x, y, width, height in document pixels and may be ' +
+      'feathered. `invert` flips the current selection. Note that this is the marching-ants ' +
+      'selection, which the plugin uses to scope the adjustment operations — it is not applied ' +
+      'to anything by itself.',
+    category: 'canvas',
+    destructive: false,
+    requiresConfirmation: false,
+    params: DocumentTargetSchema.extend({
+      mode: z.enum(['all', 'rectangle', 'ellipse', 'none', 'invert']),
+      x: z.number().optional(),
+      y: z.number().optional(),
+      width: z.number().int().positive().optional(),
+      height: z.number().int().positive().optional(),
+      feather: z.number().min(0).max(1000).optional().describe('Feather radius in pixels.'),
+    }),
+    result: DocumentStateSchema,
+  },
   resize_canvas: {
     tool: 'photoshop.resize_canvas',
     title: 'Resize Canvas',

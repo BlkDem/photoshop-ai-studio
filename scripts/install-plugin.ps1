@@ -135,7 +135,29 @@ foreach ($item in @('manifest.json', 'config.json', 'index.html', 'index.js', 's
 # `test/` holds TypeScript contract tests that only run under vitest; shipping it
 # would be dead weight inside Photoshop.
 if (Test-Path (Join-Path $target 'test')) { Remove-Item (Join-Path $target 'test') -Recurse -Force }
-Write-Step "copied $((Get-ChildItem $target -Recurse -File | Measure-Object).Count) files to $target"
+# Verify rather than trust.
+#
+# A silent copy failure here is invisible for hours: the plugin keeps running the
+# build it was installed with, every new fix appears to do nothing, and the only
+# clue is an old line number in a log. Comparing the file *contents* by name and
+# length catches the case that "copied N files" does not.
+$sourceFiles = Get-ChildItem $Source -Recurse -File | Where-Object { $_.FullName -notmatch '\\test\\' }
+$targetFiles = Get-ChildItem $target -Recurse -File
+Write-Step "copied $($targetFiles.Count) files to $target"
+
+$mismatched = @()
+foreach ($file in $sourceFiles) {
+  if ($file.FullName -match '\\test\\') { continue }
+  $relative = $file.FullName.Substring($Source.Length).TrimStart('\')
+  $installed = Join-Path $target $relative
+  if (-not (Test-Path $installed)) { $mismatched += "$relative (missing)"; continue }
+  if ((Get-FileHash $file.FullName).Hash -ne (Get-FileHash $installed).Hash) { $mismatched += "$relative (differs)" }
+}
+if ($mismatched.Count) {
+  Write-Error ("the installed plugin does not match the source:`n  - " + ($mismatched -join "`n  - "))
+  exit 1
+}
+Write-Step 'verified: every installed file matches the source' 
 
 # --- register --------------------------------------------------------------
 # A doubled backslash in the path below is a silent "plugin does not appear"

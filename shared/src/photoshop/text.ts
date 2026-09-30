@@ -51,6 +51,14 @@ export function normalizeColor(input: ColorInput): RgbColor {
 export const TextAlignSchema = z.enum(['left', 'center', 'right', 'justify']);
 export type TextAlign = z.infer<typeof TextAlignSchema>;
 
+/**
+ * What a text layer looks like now.
+ *
+ * `applied` is present on operations that take a patch rather than a full
+ * description: a property the host does not expose is skipped rather than
+ * silently reported as set, so the caller can see which part of its request
+ * landed.
+ */
 export const TextLayerInfoSchema = z.object({
   layerId: z.number().int(),
   name: z.string(),
@@ -68,6 +76,8 @@ export const TextLayerInfoSchema = z.object({
   /** Point-text origin in document pixels. */
   x: z.number().optional(),
   y: z.number().optional(),
+  /** Fields from a patch request that Photoshop actually applied. */
+  applied: z.array(z.string()).optional(),
 });
 
 export type TextLayerInfo = z.infer<typeof TextLayerInfoSchema>;

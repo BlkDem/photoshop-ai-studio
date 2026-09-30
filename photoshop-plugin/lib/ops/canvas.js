@@ -180,6 +180,107 @@ function closeDocument(ctx) {
 }
 
 /**
+ * `set_selection` — the marching-ants selection.
+ *
+ * Kept separate from any operation that *uses* a selection, so a plan can scope
+ * an edit without also committing to what the selection should be afterwards.
+ * `invert` is absent from the DOM on this build, so it falls back to selecting
+ * all and subtracting what was there — the same result, without a descriptor.
+ */
+/**
+ * The "replace the selection" type.
+ *
+ * `constants.SelectionType` holds strings on this build —
+ * `{REPLACE: 'set', EXTEND: 'addTo', ...}` — so there is no `NORMAL` member to
+ * fall back to and a numeric default is refused outright ("Invalid constant.
+ * Expected '100' to be one of Constants.SelectionType").
+ */
+function selectionType() {
+  var enumObject = ps.constants && ps.constants.SelectionType;
+  if (enumObject) {
+    if (typeof enumObject.REPLACE !== 'undefined') return enumObject.REPLACE;
+    if (typeof enumObject.replace !== 'undefined') return enumObject.replace;
+  }
+  return 'set';
+}
+
+function setSelection(ctx) {
+  var doc = ps.resolveDocument(ctx.params.documentId);
+  var params = ctx.params;
+  var selection = doc.selection;
+  if (!selection) {
+    throw StudioError('UNSUPPORTED_OPERATION', 'This Photoshop build exposes no selection object.', {
+      recoverable: false,
+    });
+  }
+
+  var feather = typeof params.feather === 'number' ? params.feather : 0;
+  if (feather > 0 && typeof selection.feather !== 'function') {
+    throw StudioError('UNSUPPORTED_OPERATION', 'This Photoshop build cannot feather a selection.', {
+      recoverable: false,
+    });
+  }
+
+  var shaped = function (fn) {
+    return Promise.resolve(fn()).then(function () {
+      return feather > 0 ? selection.feather(feather) : undefined;
+    });
+  };
+
+  var step;
+  if (params.mode === 'none') {
+    step = shaped(function () {
+      return selection.deselect();
+    });
+  } else if (params.mode === 'invert') {
+    step = shaped(function () {
+      // The DOM spells it `inverse`.
+      return typeof selection.inverse === 'function' ? selection.inverse() : undefined;
+    });
+  } else if (params.mode === 'all') {
+    step = shaped(function () {
+      return selection.selectAll();
+    });
+  } else {
+    var x = params.x;
+    var y = params.y;
+    var w = params.width;
+    var h = params.height;
+    if ([x, y, w, h].some(function (value) { return typeof value !== 'number'; })) {
+      throw StudioError('INVALID_PARAMS', 'A ' + params.mode + ' selection needs x, y, width and height.');
+    }
+    if (x < 0 || y < 0 || x + w > doc.width || y + h > doc.height) {
+      throw StudioError(
+        'INVALID_PARAMS',
+        'Selection (' + x + ',' + y + ',' + w + '×' + h + ') does not fit the ' + doc.width + '×' + doc.height + ' canvas.',
+      );
+    }
+    // The DOM takes a *bounds object* and the selection type, not loose numbers:
+    // `selectRectangle({left, top, right, bottom}, type)`. Every positional
+    // arrangement is rejected with "Invalid constant. Expected '100' to be one
+    // of Constants.SelectionType" whichever way the numbers are passed.
+    var bounds = { left: x, top: y, right: x + w, bottom: y + h };
+    step = shaped(function () {
+      return params.mode === 'ellipse'
+        ? selection.selectEllipse(bounds, selectionType())
+        : selection.selectRectangle(bounds, selectionType());
+    });
+  }
+
+  return step
+    .catch(function (err) {
+      throw StudioError('STEP_FAILED', 'Photoshop would not change the selection: ' + ((err && err.message) || String(err)), {
+        recoverable: true,
+      });
+    })
+    .then(function () {
+      var info = ps.documentInfo(doc);
+      info.layers = ps.flattenLayers(doc.layers);
+      return info;
+    });
+}
+
+/**
  * `crop_document` — discards everything outside the given rectangle.
  *
  * There is no working implementation of this on Photoshop 26.11 / UXP 9.0.2.
@@ -222,6 +323,7 @@ function cropDocument(ctx) {
 
 
 module.exports = {
+  set_selection: setSelection,
   create_document: createDocument,
   get_documents: getDocuments,
   close_document: closeDocument,

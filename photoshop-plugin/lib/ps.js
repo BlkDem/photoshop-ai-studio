@@ -310,7 +310,7 @@ function layerInfo(layer, parentId) {
     height: boundsOf(layer).height,
     parentId: parentId,
     fillOpacity: typeof layer.fillOpacity === 'number' ? round(layer.fillOpacity, 1) : undefined,
-    blendMode: layer.blendMode ? String(layer.blendMode) : undefined,
+    blendMode: layer.blendMode ? String(layer.blendMode) : 'normal',
     isBackground: layer.isBackgroundLayer === true,
     isClippingMask: layer.isClippingMask === true,
     isLocked: layer.locked === true,

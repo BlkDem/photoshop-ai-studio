@@ -99,6 +99,106 @@ function updateTextLayer(ctx) {
     });
 }
 
+/**
+ * `set_text_style` — character and paragraph properties in one shot.
+ *
+ * Every field is written straight onto `characterStyle` / `paragraphStyle`, for
+ * the same reason the colour code is: the descriptor route to these settings
+ * opens a modal dialog on 26.11.
+ *
+ * `leading` and `paragraphWidth` are not `characterStyle` properties on this
+ * build — the capability report says so — so they are applied through the paths
+ * that do work and the result reports what actually took.
+ */
+/**
+ * `true`/`false` as the `Constants.Underline` value the DOM wants.
+ *
+ * Falls back to the bare boolean on a build that does accept one, because the
+ * two shapes have coexisted and the assignment is wrapped in a try either way.
+ */
+function underlineValue(on) {
+  var enumObject = ps.constants && ps.constants.Underline;
+  if (enumObject) {
+    if (!on && typeof enumObject.NONE !== 'undefined') return enumObject.NONE;
+    // This build has no plain "on": the enum is
+    // {NONE, LEFTINVERTICAL, RIGHTINVERTICAL}, i.e. underline for vertical text
+    // only. `true` is therefore best-effort — see the capability report, which
+    // says so rather than letting a plan assume a horizontal underline appeared.
+    var candidate = on ? ['RIGHTINVERTICAL', 'SOLID', 'ON'] : ['NONE'];
+    for (var i = 0; i < candidate.length; i += 1) {
+      if (typeof enumObject[candidate[i]] !== 'undefined') return enumObject[candidate[i]];
+    }
+  }
+  return on;
+}
+
+function setTextStyle(ctx) {
+  var doc = ps.resolveDocument(ctx.params.documentId);
+  var layer = ps.findLayer(doc, ctx.params);
+  ps.assertText(layer);
+  ps.assertMutable(layer);
+  var params = ctx.params;
+
+  var style = characterStyle(layer);
+  var item = layer.textItem;
+  var applied = [];
+
+
+  var numeric = ['tracking', 'leading', 'baselineShift', 'horizontalScale', 'verticalScale'];
+  var booleans = ['fauxBold', 'fauxItalic', 'underline', 'strikethrough'];
+
+  numeric.forEach(function (key) {
+    if (typeof params[key] !== 'number') return;
+    if (key === 'leading') return; // paragraph property; handled below
+    try {
+      style[key] = params[key];
+      applied.push(key);
+    } catch (err) {
+      throw StudioError('STEP_FAILED', 'Photoshop would not set ' + key + ' on "' + layer.name + '": ' + ((err && err.message) || String(err)), {
+        recoverable: true,
+      });
+    }
+  });
+
+  booleans.forEach(function (key) {
+    if (typeof params[key] !== 'boolean') return;
+    try {
+      // `underline` and `strikethrough` are not booleans on the DOM: they take a
+      // `Constants.Underline` value, and assigning `true` fails with "'Constants
+      // .Underline' is of type boolean. Expecting type number". The model still
+      // asks for a boolean, because "underlined" is what a request means.
+      style[key] = key === 'fauxBold' || key === 'fauxItalic' ? params[key] : underlineValue(params[key]);
+      applied.push(key);
+    } catch (err) {
+      throw StudioError('STEP_FAILED', 'Photoshop would not set ' + key + ' on "' + layer.name + '": ' + ((err && err.message) || String(err)), {
+        recoverable: true,
+      });
+    }
+  });
+
+  if (typeof params.leading === 'number' && item && item.paragraphStyle) {
+    try {
+      item.paragraphStyle.leading = params.leading;
+      applied.push('leading');
+    } catch (err) {
+      /* paragraph leading is a nicety; never fail the whole edit over it */
+    }
+  }
+
+  var narrowing = typeof params.paragraphWidth === 'number';
+
+  return (narrowing ? setParagraphWidth(layer, params.paragraphWidth) : Promise.resolve())
+    .then(function (paragraph) {
+      if (paragraph) applied.push('paragraphWidth');
+      // `textInfo` is a promise (it reads the colour back); assigning onto it
+      // would put `applied` on the promise object and lose the whole list.
+      return textInfo(doc, layer).then(function (info) {
+        info.applied = applied;
+        return info;
+      });
+    });
+}
+
 /** `set_text_position` */
 function setTextPosition(ctx) {
   var doc = ps.resolveDocument(ctx.params.documentId);
@@ -470,6 +570,12 @@ function textPosition(doc, params) {
   return { x: x, y: y };
 }
 
+/**
+ * Narrows a text layer to `width` pixels and wraps the text.
+ *
+ * Returns whether it did anything, so the caller can report it in `applied`
+ * instead of silently omitting a field the plan asked for.
+ */
 function setParagraphWidth(layer, width) {
   try {
     if (layer.textItem && typeof layer.textItem.convertToParagraphText === 'function') {
@@ -478,12 +584,16 @@ function setParagraphWidth(layer, width) {
       if (bounds.width > 0 && bounds.width !== width) {
         // Awaited: the caller describes the layer straight after, and reading the
         // bounds before the scale lands reports the pre-resize width.
-        return layers.scaleBy(layer, width / bounds.width, 1);
+        return Promise.resolve(layers.scaleBy(layer, width / bounds.width, 1)).then(function () {
+          return true;
+        });
       }
+      return Promise.resolve(true);
     }
   } catch (err) {
     /* paragraph conversion is best effort */
   }
+  return Promise.resolve(false);
 }
 
 /** Top-left of the text box, used by `set_text_position`. */
@@ -502,6 +612,7 @@ module.exports = {
   get_text_layer: getTextLayer,
   update_text_layer: updateTextLayer,
   set_text_position: setTextPosition,
+  set_text_style: setTextStyle,
   set_text_font_size: setTextFontSize,
   set_text_color: setTextColor,
   normalizeColor: normalizeColor,

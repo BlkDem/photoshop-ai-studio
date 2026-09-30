@@ -75,9 +75,9 @@ var NOT_ON_DOM = {
   'layer.smart_object': 'Not on the DOM; `convertToSmartObject` has to go through batchPlay.',
   'layer.pixels': 'Not on the DOM on this build.',
   'layer.flip': 'Not on the DOM.',
-  'selection.invert': 'Not on the DOM.',
   'adjustment.layer': 'Not on the DOM; an adjustment layer needs a `makeAdjustmentLayer` descriptor.',
   'text.leading': 'Not exposed on the DOM, though `paragraphStyle.leading` may be.',
+  'text.underline': 'Constants.Underline has no plain "on" here, only the vertical-text variants.',
 };
 
 /**
@@ -159,7 +159,7 @@ function readApiSurface() {
     'selection.all': probe(doc, 'selection.selectAll'),
     'selection.rectangle': probe(doc, 'selection.selectRectangle'),
     'selection.deselect': probe(doc, 'selection.deselect'),
-    'selection.invert': probe(doc, 'selection.invert'),
+    'selection.invert': probe(doc, 'selection.inverse'),
     'selection.feather': probe(doc, 'selection.feather'),
 
     // --- adjustments and channels ---
@@ -176,6 +176,8 @@ function readApiSurface() {
     'text.faux_bold': probe(layer, 'textItem.characterStyle.fauxBold'),
     'text.faux_italic': probe(layer, 'textItem.characterStyle.fauxItalic'),
     'text.baseline_shift': probe(layer, 'textItem.characterStyle.baselineShift'),
+    'text.underline_enum': probe(constants, 'Underline'),
+    'selection_type_enum': probe(constants, 'SelectionType'),
     'text.paragraph_width': probe(layer, 'textItem.convertToParagraphText'),
 
     // --- colour ---

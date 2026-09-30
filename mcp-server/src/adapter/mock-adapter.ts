@@ -220,6 +220,84 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
     return { id, name: doc.name };
   }
 
+  async setSelection(params: ParamsOf<'set_selection'>): Promise<DocumentState> {
+    const doc = this.active();
+    let box: Record<string, unknown> | null = null;
+
+    if (params.mode === 'all') {
+      box = { x: 0, y: 0, width: doc.width, height: doc.height };
+    } else if (params.mode === 'invert') {
+      // The mock has no real marching ants; a marker that records the inversion is
+      // enough for the smoke test to assert the plan reached the adapter.
+      const previous = (doc as unknown as { selection?: Record<string, unknown> | null }).selection ?? null;
+      box = previous
+        ? { x: 0, y: 0, width: doc.width, height: doc.height, invertedFrom: previous }
+        : { x: 0, y: 0, width: doc.width, height: doc.height };
+    } else if (params.mode !== 'none') {
+      const x = params.x ?? 0;
+      const y = params.y ?? 0;
+      const width = params.width ?? 0;
+      const height = params.height ?? 0;
+      if (x < 0 || y < 0 || x + width > doc.width || y + height > doc.height) {
+        throw new StudioException(
+          'INVALID_PARAMS',
+          `Selection (${x},${y},${width}x${height}) does not fit the ${doc.width}x${doc.height} canvas.`,
+        );
+      }
+      box = { x, y, width, height, shape: params.mode };
+    }
+
+    (doc as unknown as { selection?: Record<string, unknown> | null }).selection = box
+      ? { ...box, feather: params.feather ?? 0 }
+      : null;
+
+    this.lastLatencyMs = 0;
+    return { ...this.toInfo(doc), layers: doc.layers.map((l) => ({ ...l })) };
+  }
+
+  async setLayerBlendMode(params: ParamsOf<'set_layer_blend_mode'>): Promise<LayerInfo> {
+    const { layer } = this.resolveLayer(params);
+    this.assertMutable(layer);
+    layer.blendMode = params.mode;
+    return { ...layer };
+  }
+
+  async setLayerFillOpacity(params: ParamsOf<'set_layer_fill_opacity'>): Promise<LayerInfo> {
+    const { layer } = this.resolveLayer(params);
+    this.assertMutable(layer);
+    if (params.opacity < 0 || params.opacity > 100) {
+      throw new StudioException('INVALID_PARAMS', `Fill opacity must be 0..100, received ${params.opacity}`);
+    }
+    layer.fillOpacity = params.opacity;
+    return { ...layer };
+  }
+
+  async setTextStyle(params: ParamsOf<'set_text_style'>): Promise<TextLayerInfo> {
+    const { doc, layer } = this.resolveTextLayer(params);
+    const text = doc.texts.get(layer.id);
+    if (!text) throw new StudioException('NOT_A_TEXT_LAYER', `"${layer.name}" has no text content`);
+
+    const applied: string[] = [];
+    for (const key of ['tracking', 'leading', 'baselineShift', 'horizontalScale', 'verticalScale'] as const) {
+      const value = params[key];
+      if (typeof value === 'number') {
+        (text as unknown as Record<string, unknown>)[key] = value;
+        applied.push(key);
+      }
+    }
+    for (const key of ['fauxBold', 'fauxItalic', 'underline', 'strikethrough'] as const) {
+      if (typeof params[key] === 'boolean') {
+        (text as unknown as Record<string, unknown>)[key] = params[key];
+        applied.push(key);
+      }
+    }
+    if (typeof params.paragraphWidth === 'number') {
+      layer.width = params.paragraphWidth;
+      applied.push('paragraphWidth');
+    }
+    return { ...this.readText(doc, layer), applied };
+  }
+
   async getCapabilities(): Promise<CapabilitiesResult> {
     const capabilities: Record<string, { api: boolean; usable: boolean }> = {};
     for (const id of MOCK_CAPABILITIES) capabilities[id] = { api: true, usable: true };

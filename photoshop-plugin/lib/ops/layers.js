@@ -126,6 +126,110 @@ function moveLayer(ctx) {
   });
 }
 
+/**
+ * Blend-mode names, for builds whose `constants.BlendMode` is missing or partial.
+ *
+ * Keyed by the *value* the DOM reports, the same way `KIND_BY_VALUE` handles layer
+ * kinds, because that string is what `layerInfo` has to echo back.
+ */
+var BLEND_BY_VALUE = {
+  normal: 'normal',
+  dissolve: 'dissolve',
+  darken: 'darken',
+  multiply: 'multiply',
+  colorBurn: 'colorBurn',
+  linearBurn: 'linearBurn',
+  darkerColor: 'darkerColor',
+  lighten: 'lighten',
+  screen: 'screen',
+  colorDodge: 'colorDodge',
+  linearDodge: 'linearDodge',
+  lighterColor: 'lighterColor',
+  overlay: 'overlay',
+  softLight: 'softLight',
+  hardLight: 'hardLight',
+  vividLight: 'vividLight',
+  linearLight: 'linearLight',
+  pinLight: 'pinLight',
+  hardMix: 'hardMix',
+  difference: 'difference',
+  exclusion: 'exclusion',
+  subtract: 'subtract',
+  divide: 'divide',
+  hue: 'hue',
+  saturation: 'saturation',
+  color: 'color',
+  luminosity: 'luminosity',
+};
+
+/** Resolves a requested mode to what this build actually accepts. */
+function blendValue(requested) {
+  var enumObject = constants.BlendMode;
+  if (enumObject && typeof enumObject[requested] !== 'undefined') return enumObject[requested];
+  if (enumObject && typeof enumObject[requested.toUpperCase()] !== 'undefined') {
+    return enumObject[requested.toUpperCase()];
+  }
+  return BLEND_BY_VALUE[requested] || requested;
+}
+
+function mapBlendMode(mode) {
+  if (typeof mode !== 'string' || mode.length === 0) return 'normal';
+  return BLEND_BY_VALUE[mode] || mode;
+}
+
+/** `set_layer_blend_mode` */
+function setLayerBlendMode(ctx) {
+  var doc = ps.resolveDocument(ctx.params.documentId);
+  var layer = ps.findLayer(doc, ctx.params);
+  ps.assertMutable(layer);
+
+  var value = blendValue(ctx.params.mode);
+  try {
+    layer.blendMode = value;
+  } catch (err) {
+    throw StudioError('STEP_FAILED', 'Photoshop would not set the blend mode: ' + ((err && err.message) || String(err)), {
+      recoverable: true,
+    });
+  }
+  // Read back rather than echo: a silently rejected assignment is the failure mode
+  // this plugin keeps hitting, and returning what was asked for would hide it.
+  if (mapBlendMode(layer.blendMode) !== ctx.params.mode) {
+    throw StudioError(
+      'STEP_FAILED',
+      'Photoshop reports the blend mode of "' + layer.name + '" as "' + layer.blendMode + '" after setting "' + ctx.params.mode + '".',
+      { recoverable: true, details: { requested: ctx.params.mode, actual: String(layer.blendMode) } },
+    );
+  }
+  return describe(doc, layer);
+}
+
+/** `set_layer_fill_opacity` */
+function setLayerFillOpacity(ctx) {
+  var doc = ps.resolveDocument(ctx.params.documentId);
+  var layer = ps.findLayer(doc, ctx.params);
+  ps.assertMutable(layer);
+
+  var value = ctx.params.opacity;
+  if (typeof value !== 'number' || value < 0 || value > 100) {
+    throw StudioError('INVALID_PARAMS', 'Fill opacity must be between 0 and 100, received ' + value);
+  }
+  try {
+    layer.fillOpacity = value;
+  } catch (err) {
+    throw StudioError('STEP_FAILED', 'Photoshop would not set fill opacity: ' + ((err && err.message) || String(err)), {
+      recoverable: true,
+    });
+  }
+  if (Math.abs(Number(layer.fillOpacity) - value) > 0.6) {
+    throw StudioError(
+      'STEP_FAILED',
+      'Photoshop reports the fill opacity of "' + layer.name + '" as ' + layer.fillOpacity + ' after setting ' + value + '.',
+      { recoverable: true, details: { requested: value, actual: Number(layer.fillOpacity) } },
+    );
+  }
+  return describe(doc, layer);
+}
+
 /** `set_layer_visibility` */
 function setLayerVisibility(ctx) {
   var doc = ps.resolveDocument(ctx.params.documentId);
@@ -294,6 +398,9 @@ module.exports = {
   move_layer: moveLayer,
   set_layer_visibility: setLayerVisibility,
   set_layer_opacity: setLayerOpacity,
+  set_layer_blend_mode: setLayerBlendMode,
+  set_layer_fill_opacity: setLayerFillOpacity,
+  mapBlendMode: mapBlendMode,
   create_group: createGroup,
   move_layer_to_group: moveLayerToGroup,
   reorder_layer: reorderLayer,

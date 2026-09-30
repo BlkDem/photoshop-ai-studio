@@ -26,7 +26,44 @@ export const LayerKindSchema = z.enum([
 
 export type LayerKind = z.infer<typeof LayerKindSchema>;
 
-export const BlendModeSchema = z.string().min(1);
+/**
+ * Photoshop's layer blend modes, named the way the DOM names them.
+ *
+ * These are the UXP `Layer.blendMode` values, not the Photoshop UI labels:
+ * "Colour Dodge" is `colorDodge`, "Soft Light" is `softLight`. The plugin
+ * consults `constants.BlendMode` first and falls back to this list, so a build
+ * that renames a member does not break the mapping — and a model that invents a
+ * mode is rejected here rather than silently becoming `normal`.
+ */
+export const BlendModeSchema = z.enum([
+  'normal',
+  'dissolve',
+  'darken',
+  'multiply',
+  'colorBurn',
+  'linearBurn',
+  'darkerColor',
+  'lighten',
+  'screen',
+  'colorDodge',
+  'linearDodge',
+  'lighterColor',
+  'overlay',
+  'softLight',
+  'hardLight',
+  'vividLight',
+  'linearLight',
+  'pinLight',
+  'hardMix',
+  'difference',
+  'exclusion',
+  'subtract',
+  'divide',
+  'hue',
+  'saturation',
+  'color',
+  'luminosity',
+]);
 export type BlendMode = z.infer<typeof BlendModeSchema>;
 
 /** Axis-aligned bounds in document pixels. Zero-sized for empty layers. */

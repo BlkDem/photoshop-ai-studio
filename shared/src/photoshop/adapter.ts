@@ -43,6 +43,14 @@ export interface PhotoshopAdapter {
    * call to find out whether a document is needed at all.
    */
   getCapabilities(): Promise<CapabilitiesResult>;
+  /** Change the marching-ants selection; returns the document so the caller sees the effect. */
+  setSelection(params: ParamsOf<'set_selection'>): Promise<DocumentState>;
+  /** How the layer combines with what is beneath it. */
+  setLayerBlendMode(params: ParamsOf<'set_layer_blend_mode'>): Promise<LayerInfo>;
+  /** Fill opacity, which fades content without touching effects. */
+  setLayerFillOpacity(params: ParamsOf<'set_layer_fill_opacity'>): Promise<LayerInfo>;
+  /** Character and paragraph properties, applied as a patch. */
+  setTextStyle(params: ParamsOf<'set_text_style'>): Promise<TextLayerInfo>;
   /** A new empty document, which becomes the active one. */
   createDocument(params: ParamsOf<'create_document'>): Promise<DocumentInfo>;
   /** The open documents and which is active. No layer walk. */
