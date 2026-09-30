@@ -134,6 +134,22 @@ export class UxpRemoteAdapter implements PhotoshopAdapter {
     return (await this.send('get_document_info', {})) as ResultOf<'get_document_info'>;
   }
 
+  async getCapabilities(): Promise<ResultOf<'get_capabilities'>> {
+    return (await this.send('get_capabilities', {})) as ResultOf<'get_capabilities'>;
+  }
+
+  async createDocument(params: ParamsOf<'create_document'>): Promise<ResultOf<'create_document'>> {
+    return (await this.send('create_document', params)) as ResultOf<'create_document'>;
+  }
+
+  async getDocuments(): Promise<ResultOf<'get_documents'>> {
+    return (await this.send('get_documents', {})) as ResultOf<'get_documents'>;
+  }
+
+  async closeDocument(params: ParamsOf<'close_document'>): Promise<ResultOf<'close_document'>> {
+    return (await this.send('close_document', params)) as ResultOf<'close_document'>;
+  }
+
   async duplicateDocument(params: ParamsOf<'duplicate_document'>): Promise<ResultOf<'duplicate_document'>> {
     return (await this.send('duplicate_document', params)) as ResultOf<'duplicate_document'>;
   }

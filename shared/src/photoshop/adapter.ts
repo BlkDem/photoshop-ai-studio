@@ -1,7 +1,8 @@
 import * as z from 'zod/v4';
 
-import type { DocumentInfo, DocumentRef, DocumentState, SaveResult } from './document.js';import type { LayerInfo, LayerSelector, LayerPosition } from './layer.js';
-import type { ExportResult, ExportFormat, ParamsOf, PreviewResult } from './operations.js';
+import type { DocumentInfo, DocumentRef, DocumentState, SaveResult } from './document.js';
+import type { DocumentListResult } from './operations.js';import type { LayerInfo, LayerSelector, LayerPosition } from './layer.js';
+import type { CapabilitiesResult, ExportResult, ExportFormat, ParamsOf, PreviewResult } from './operations.js';
 import type { RgbColor, TextAlign, TextLayerInfo } from './text.js';
 /**
  * The Photoshop abstraction layer (brief §12).
@@ -34,6 +35,20 @@ export interface PhotoshopAdapter {
   getDocument(documentId?: string): Promise<DocumentState>;
   /** Metadata only, no layer walk. */
   getDocumentInfo(documentId?: string): Promise<DocumentInfo>;
+  /**
+   * What this Photoshop build can actually be asked to do.
+   *
+   * Separate from `getDocumentInfo` on purpose: it describes the *host*, not
+   * the artwork, and it must answer with no document open — it is the tool you
+   * call to find out whether a document is needed at all.
+   */
+  getCapabilities(): Promise<CapabilitiesResult>;
+  /** A new empty document, which becomes the active one. */
+  createDocument(params: ParamsOf<'create_document'>): Promise<DocumentInfo>;
+  /** The open documents and which is active. No layer walk. */
+  getDocuments(): Promise<DocumentListResult>;
+  /** Close a document, optionally saving to its existing path first. */
+  closeDocument(params: ParamsOf<'close_document'>): Promise<DocumentRef>;
   duplicateDocument(params: ParamsOf<'duplicate_document'>): Promise<DocumentRef>;
   saveDocument(params: ParamsOf<'save_document'>): Promise<SaveResult>;
 

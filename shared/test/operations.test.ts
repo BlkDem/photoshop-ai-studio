@@ -57,7 +57,7 @@ describe('operation registry', () => {
   it('marks exactly the destructive tools', () => {
     const destructive = TOOL_META.filter((t) => t.destructive).map((t) => t.op).sort();
     expect(destructive).toEqual(
-      ['crop_document', 'delete_layer', 'export_document', 'export_jpg', 'export_png', 'save_document', 'save_psd'].sort(),
+      ['close_document', 'crop_document', 'delete_layer', 'export_document', 'export_jpg', 'export_png', 'save_document', 'save_psd'].sort(),
     );
   });
 

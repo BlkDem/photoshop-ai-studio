@@ -16,6 +16,10 @@ export const DISPATCH: OpDispatcher = {
   // --- document ------------------------------------------------------------
   get_document: (a) => a.getDocument(),
   get_document_info: (a) => a.getDocumentInfo(),
+  get_capabilities: (a) => a.getCapabilities(),
+  create_document: (a, p) => a.createDocument(p),
+  get_documents: (a) => a.getDocuments(),
+  close_document: (a, p) => a.closeDocument(p),
   duplicate_document: (a, p) => a.duplicateDocument(p),
   save_document: (a, p) => a.saveDocument(p),
 

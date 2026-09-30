@@ -81,6 +81,105 @@ function verticalFor(anchor) {
 }
 
 /**
+ * `create_document` — a new empty document, which becomes the active one.
+ *
+ * `name` is honoured where the host allows it and silently ignored where
+ * `Document.name` is getter-only, as it is on Photoshop 26.11. The result always
+ * carries the name Photoshop actually gave the document.
+ */
+function createDocument(ctx) {
+  var params = ctx.params;
+  var width = typeof params.width === 'number' ? params.width : 1920;
+  var height = typeof params.height === 'number' ? params.height : 1080;
+
+  var added;
+  try {
+    added = ps.app.documents.add({
+      width: width,
+      height: height,
+      resolution: typeof params.resolution === 'number' ? params.resolution : 72,
+      fill: params.background === 'background' ? 'background' : params.background === 'transparent' ? 'transparent' : 'white',
+    });
+  } catch (err) {
+    throw StudioError('STEP_FAILED', 'Photoshop would not create the document: ' + ((err && err.message) || String(err)), {
+      recoverable: true,
+    });
+  }
+
+  // `documents.add()` hands back a thenable: reading `.id` or `.name` off it
+  // before it settles gives `undefined`, and reporting those would describe a
+  // document that does not exist.
+  return Promise.resolve(added).then(function (doc) {
+    if (!doc) throw StudioError('STEP_FAILED', 'Photoshop returned no document.', { recoverable: true });
+    // `Document.name` is a getter on this build, so a requested name usually will
+    // not stick. The real name is reported either way — inventing one would put a
+    // name in the plan that Photoshop does not have.
+    if (params.name) {
+      try {
+        doc.name = params.name;
+      } catch (err) {
+        /* reported below as whatever Photoshop actually called it */
+      }
+    }
+    return ps.documentInfo(doc);
+  });
+}
+
+/** `get_documents` — cheap: no layer walk. */
+function getDocuments() {
+  var docs = ps.app.documents || [];
+  var out = [];
+  for (var i = 0; i < docs.length; i += 1) {
+    var doc = docs[i];
+    if (!doc) continue;
+    out.push({ id: String(doc.id), name: String(doc.name) });
+  }
+  var activeId = null;
+  try {
+    activeId = ps.app.activeDocument ? String(ps.app.activeDocument.id) : null;
+  } catch (err) {
+    activeId = null;
+  }
+  return { activeDocumentId: activeId, documents: out };
+}
+
+/**
+ * `close_document`.
+ *
+ * `save: true` writes to the document's existing path, which is an overwrite of
+ * whatever is there — that is why the operation is destructive and requires
+ * confirmation whatever `save` says. A document that has never been saved cannot
+ * be closed with `save: true`; Photoshop would need a destination, and inventing
+ * one is not this operation's business.
+ */
+function closeDocument(ctx) {
+  var doc = ps.resolveDocument(ctx.params.documentId);
+  var ref = { id: String(doc.id), name: String(doc.name) };
+
+  if (ctx.params.save === true && !doc.path) {
+    throw StudioError(
+      'DOCUMENT_NOT_SAVED',
+      'This document has never been saved, so there is nowhere to save it. Use save_psd with a path first.',
+      { details: { document: ref.name }, recoverable: false },
+    );
+  }
+
+  var closed = ctx.params.save === true ? doc.save() : doc.closeWithoutSaving();
+  return Promise.resolve(closed).then(
+    function () {
+      return ref;
+    },
+    function (err) {
+      throw StudioError(
+        'STEP_FAILED',
+        'Photoshop would not close "' + ref.name + '": ' + ((err && err.message) || String(err)),
+        { recoverable: true },
+      );
+    },
+  );
+}
+
+/**
  * `crop_document` — discards everything outside the given rectangle.
  *
  * There is no working implementation of this on Photoshop 26.11 / UXP 9.0.2.
@@ -123,6 +222,9 @@ function cropDocument(ctx) {
 
 
 module.exports = {
+  create_document: createDocument,
+  get_documents: getDocuments,
+  close_document: closeDocument,
   __test_anchor: function (anchor) {
     return { horizontal: horizontalFor(anchor), vertical: verticalFor(anchor) };
   },

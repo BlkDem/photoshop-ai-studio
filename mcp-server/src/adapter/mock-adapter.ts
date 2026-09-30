@@ -10,7 +10,10 @@ import {
   type AdapterConnection,
   type AdapterTarget,
   type Anchor,
+  type CapabilitiesResult,
+  type DocumentListResult,
   type DocumentInfo,
+  type DocumentRef,
   type DocumentState,
   type ExportResult,
   type LayerInfo,
@@ -24,6 +27,26 @@ import {
   type TextLayerInfo,
 } from '@photoshop-ai-studio/shared';
 import { Workspace } from '../workspace.js';
+
+/** The capability ids the plugin reports; kept here so the two stay comparable. */
+const MOCK_CAPABILITIES = [
+  'document.read',
+  'document.new',
+  'document.close',
+  'document.duplicate',
+  'document.save',
+  'document.resize_canvas',
+  'document.export_png',
+  'layer.create',
+  'layer.move',
+  'layer.scale',
+  'layer.mask',
+  'selection.all',
+  'adjustment.layer',
+  'text.create',
+  'text.color',
+  'image.place',
+] as const;
 
 /**
  * In-memory Photoshop.
@@ -134,6 +157,79 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
     const doc = this.active();
     this.lastLatencyMs = 0;
     return { ...this.toInfo(doc), layers: doc.layers.map((l) => ({ ...l })) };
+  }
+
+  /**
+   * The mock claims everything works.
+   *
+   * It is the in-memory adapter used by the offline smoke test, where "does the
+   * pipeline work" is the question — not "does Photoshop 26.11 cooperate". The
+   * real report comes from the UXP plugin.
+   */
+  async createDocument(params: ParamsOf<'create_document'>): Promise<DocumentInfo> {
+    const info: DocumentInfo = {
+      id: randomUUID(),
+      name: params.name ?? 'Untitled-1',
+      width: params.width,
+      height: params.height,
+      resolution: params.resolution ?? 72,
+      colorMode: params.colorMode ?? 'RGB',
+      layerCount: 0,
+      path: null,
+      saved: false,
+      active: true,
+      bitsPerChannel: 8,
+      pixelAspectRatio: 1,
+      zoom: 100,
+    };
+    const doc = this.newDocument({
+      name: info.name,
+      width: info.width,
+      height: info.height,
+      resolution: info.resolution,
+      colorMode: info.colorMode,
+    });
+    if (params.background !== 'transparent') {
+      this.addLayer(doc, {
+        name: 'Background',
+        type: 'pixel',
+        x: 0,
+        y: 0,
+        width: info.width,
+        height: info.height,
+        isBackground: true,
+      });
+    }
+    this.activeId = doc.id;
+    return { ...info, id: doc.id, layerCount: doc.layers.length };
+  }
+
+  async getDocuments(): Promise<DocumentListResult> {
+    const documents = [...this.documents.entries()].map(([id, doc]) => ({ id, name: doc.name }));
+    return { activeDocumentId: this.activeId, documents };
+  }
+
+  async closeDocument(params: ParamsOf<'close_document'>): Promise<DocumentRef> {
+    const id = params.documentId === 'active' ? (this.activeId ?? '') : params.documentId;
+    const doc = this.documents.get(id);
+    if (!doc) {
+      throw new StudioException('DOCUMENT_NOT_FOUND', `No open document with id "${id}".`);
+    }
+    this.documents.delete(id);
+    if (this.activeId === id) this.activeId = this.documents.keys().next().value ?? null;
+    return { id, name: doc.name };
+  }
+
+  async getCapabilities(): Promise<CapabilitiesResult> {
+    const capabilities: Record<string, { api: boolean; usable: boolean }> = {};
+    for (const id of MOCK_CAPABILITIES) capabilities[id] = { api: true, usable: true };
+    return {
+      hostApp: 'photoshop',
+      hostVersion: 'mock',
+      uxpVersion: 'mock',
+      capabilities,
+      unsupported: [],
+    };
   }
 
   async getDocumentInfo(): Promise<DocumentInfo> {

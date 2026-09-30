@@ -31,6 +31,10 @@ export const OPERATION_NAMES = [
   // document
   'get_document',
   'get_document_info',
+  'get_capabilities',
+  'create_document',
+  'get_documents',
+  'close_document',
   'duplicate_document',
   'save_document',
   // layers
@@ -98,6 +102,56 @@ export const OutputPathSchema = z
     'Destination path, absolute or relative to the configured workspace root. ' +
       'Paths outside the workspace are rejected.',
   );
+
+/**
+ * A short list of open documents.
+ *
+ * Distinct from `get_documents_info`, which walks layers: listing what is open
+ * must stay cheap, because it is what a planner calls before deciding whether
+ * it needs a document at all.
+ */
+export const DocumentListResultSchema = z.object({
+  activeDocumentId: z.string().nullable(),
+  documents: z.array(DocumentRefSchema),
+});
+
+export type DocumentListResult = z.infer<typeof DocumentListResultSchema>;
+
+/**
+ * What the connected Photoshop build can actually be asked to do.
+ *
+ * Presence is not proof: on Photoshop 26.11 `Layer.translate` exists and silently
+ * does nothing, `Folder.getEntry().read` does not exist, and `placeEvent` refuses
+ * every file the plugin can write. So the report separates three things —
+ *
+ *  - `api`    the entry point is there;
+ *  - `usable` the plugin has exercised it successfully against this build;
+ *  - `notes`  what is known about it, for the ones that are not usable.
+ *
+ * The Studio shows this so a plan can be refused with a reason instead of
+ * failing halfway through.
+ */
+export const CapabilityEntrySchema = z.object({
+  /** Whether the API surface exists on this host. */
+  api: z.boolean(),
+  /** Whether this plugin has actually performed it here and seen it take effect. */
+  usable: z.boolean(),
+  /** Why not, when `usable` is false and something is known. */
+  note: z.string().optional(),
+});
+
+export const CapabilitiesResultSchema = z.object({
+  hostApp: z.string(),
+  hostVersion: z.string(),
+  uxpVersion: z.string(),
+  /** Areas the plugin is designed to cover, keyed by capability id. */
+  capabilities: z.record(z.string(), CapabilityEntrySchema),
+  /** Capability ids that are present but known not to work on this build. */
+  unsupported: z.array(z.string()),
+});
+
+export type CapabilityEntry = z.infer<typeof CapabilityEntrySchema>;
+export type CapabilitiesResult = z.infer<typeof CapabilitiesResultSchema>;
 
 /**
  * A file Photoshop wrote inside its own sandbox, awaiting publication.
@@ -192,6 +246,68 @@ export const OPERATIONS = {
     requiresConfirmation: false,
     params: NoParamsSchema,
     result: DocumentStateSchema,
+  },
+  create_document: {
+    tool: 'photoshop.create_document',
+    title: 'Create Document',
+    description:
+      'Create a new empty document and make it active. Use this when the request is to start ' +
+      'something rather than change what is open — otherwise work on the document the user ' +
+      'already has, because opening a new one hides their work.',
+    category: 'document',
+    destructive: false,
+    requiresConfirmation: false,
+    params: z.object({
+      name: z.string().min(1).max(255).optional().describe('Document name, without the extension.'),
+      width: z.number().int().positive().max(30000).default(1920),
+      height: z.number().int().positive().max(30000).default(1080),
+      resolution: z.number().int().positive().max(1200).optional().default(72),
+      colorMode: z.enum(['RGB', 'CMYK', 'GRAYSCALE', 'LAB', 'BITMAP']).default('RGB'),
+      /** Photoshop's own three choices; `transparent` is an empty layer. */
+      background: z.enum(['white', 'background', 'transparent']).default('white'),
+    }),
+    result: DocumentInfoSchema,
+  },
+  get_documents: {
+    tool: 'photoshop.get_documents',
+    title: 'Get Documents',
+    description:
+      'List the open documents and which one is active. Cheap: it reads no layer data, so it is ' +
+      'the right first call when deciding what to work on.',
+    category: 'document',
+    destructive: false,
+    requiresConfirmation: false,
+    params: NoParamsSchema,
+    result: DocumentListResultSchema,
+  },
+  close_document: {
+    tool: 'photoshop.close_document',
+    title: 'Close Document',
+    description:
+      'Close a document. With `save: false` (the default) unsaved changes are discarded, which ' +
+      'is destructive; with `save: true` the document is saved to its current path first.',
+    category: 'document',
+    destructive: true,
+    requiresConfirmation: true,
+    params: DocumentTargetSchema.extend({
+      save: z.boolean().default(false).describe('Save to the existing path before closing.'),
+    }),
+    result: DocumentRefSchema,
+  },
+  get_capabilities: {
+    tool: 'photoshop.get_capabilities',
+    title: 'Get Capabilities',
+    description:
+      'Report which Photoshop features this build actually supports. Non-destructive: it ' +
+      'inspects the API surface and the plugin\'s own record of what it has verified, and ' +
+      'never touches the document. Call it before planning work that depends on masks, ' +
+      'adjustments, selections or smart objects, so an unsupported feature can be refused ' +
+      'up front rather than failing halfway through.',
+    category: 'document',
+    destructive: false,
+    requiresConfirmation: false,
+    params: NoParamsSchema,
+    result: CapabilitiesResultSchema,
   },
   get_document_info: {
     tool: 'photoshop.get_document_info',

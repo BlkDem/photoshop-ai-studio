@@ -531,3 +531,104 @@ describe('text colour round-trips through the DOM', () => {
     expect(source.replace(/\/\*[\s\S]*?\*\//g, '')).not.toContain(`_ref: 'textLayer'`);
   });
 });
+
+describe('document lifecycle', () => {
+  /**
+   * A Photoshop stub whose document collection can grow and shrink.
+   *
+   * `documents.add` ignores a `name` argument and the resulting `Document` has a
+   * getter-only `name`, because that is what Photoshop 26.11 does — a stub that
+   * allowed either would hide exactly the behaviour this is here to pin down.
+   */
+  function documentStub() {
+    const photoshop = photoshopStub() as Record<string, any>;
+    const documents = [photoshop.app.activeDocument];
+    photoshop.app.documents = documents;
+    photoshop.app.documents.add = (options: { width?: number; height?: number }) => {
+      const created = {
+        ...photoshop.app.activeDocument,
+        id: documents.length + 1,
+        width: options.width ?? 100,
+        height: options.height ?? 100,
+      };
+      Object.defineProperty(created, 'name', { get: () => 'Без имени-1', configurable: false });
+      documents.push(created);
+      // The real DOM makes a new document active; the stub has to, or
+      // `get_documents` would report the wrong active id.
+      photoshop.app.activeDocument = created;
+      return created;
+    };
+    return photoshop;
+  }
+
+  function canvas(photoshop: unknown) {
+    return loadPluginFile(pluginRoot, 'lib/ops/canvas.js', undefined, photoshop as Stub) as {
+      create_document: (ctx: { params: Record<string, unknown> }) => Promise<{
+        id: string;
+        name: string;
+        width: number;
+        height: number;
+      }>;
+      get_documents: () => Promise<{ activeDocumentId: string | null; documents: { id: string; name: string }[] }>;
+      close_document: (ctx: { params: Record<string, unknown> }) => Promise<{ name: string }>;
+    };
+  }
+
+  it('creates a document with the requested geometry', async () => {
+    const photoshop = documentStub();
+    const ops = canvas(photoshop);
+
+    const info = await ops.create_document({
+      params: { name: 'Autumn Sale', width: 1080, height: 1080, resolution: 72, colorMode: 'RGB', background: 'transparent' },
+    });
+
+    expect(info.width).toBe(1080);
+    expect(info.height).toBe(1080);
+  });
+
+  it('reports the name Photoshop gave the document, not the one requested', async () => {
+    // `Document.name` is a getter on 26.11, so assigning it throws. Reporting the
+    // requested name instead would put one in the plan that Photoshop does not have.
+    const photoshop = documentStub();
+    const ops = canvas(photoshop);
+
+    const info = await ops.create_document({ params: { name: 'Autumn Sale', width: 640, height: 480 } });
+
+    expect(info.name).toBe('Без имени-1');
+  });
+
+  it('lists open documents and names the active one', async () => {
+    const photoshop = documentStub();
+    const ops = canvas(photoshop);
+
+    const created = await ops.create_document({ params: { width: 100, height: 100 } });
+    const listed = await ops.get_documents();
+
+    expect(listed.documents).toHaveLength(2);
+    expect(listed.activeDocumentId).toBe(created.id);
+  });
+
+  it('refuses to save-and-close a document that has never been saved', async () => {
+    const photoshop = documentStub();
+    const ops = canvas(photoshop);
+
+    // Saving would need a destination, and inventing one is not this operation's job.
+    // The refusal is a synchronous throw: the adapter turns op throws into rejected
+    // results, and the document is only known to be unsaved before any await.
+    expect(() => ops.close_document({ params: { documentId: 'active', save: true } })).toThrow(/never been saved/);
+  });
+
+  it('closes without saving when asked to discard', async () => {
+    const photoshop = documentStub();
+    let closed = false;
+    (photoshop.app.activeDocument as Record<string, unknown>).closeWithoutSaving = () => {
+      closed = true;
+    };
+    const ops = canvas(photoshop);
+
+    const ref = await ops.close_document({ params: { documentId: 'active', save: false } });
+
+    expect(closed).toBe(true);
+    expect(ref.name).toBe('stub.psd');
+  });
+});

@@ -20,12 +20,17 @@ var canvasOps = require('./ops/canvas.js');
 var layerOps = require('./ops/layers.js');
 var textOps = require('./ops/text.js');
 var imageOps = require('./ops/images.js');
+var capabilityOps = require('./ops/capabilities.js');
 
 /** op name → (ctx) => Promise<result>. `ctx` is {params, config, documentId}. */
 var OPERATIONS = {
   // document
   get_document: canvasOps.get_document,
   get_document_info: canvasOps.get_document_info,
+  get_capabilities: capabilityOps.get_capabilities,
+  create_document: canvasOps.create_document,
+  get_documents: canvasOps.get_documents,
+  close_document: canvasOps.close_document,
   duplicate_document: canvasOps.duplicate_document,
   save_document: imageOps.save_document,
 
@@ -162,6 +167,10 @@ function commandNameFor(op) {
   var names = {
     get_document: 'Read document',
     get_document_info: 'Read document info',
+    get_capabilities: 'Read capabilities',
+    create_document: 'Create document',
+    get_documents: 'Read documents',
+    close_document: 'Close document',
     duplicate_document: 'Duplicate document',
     save_document: 'Save document',
     get_layers: 'Read layers',
