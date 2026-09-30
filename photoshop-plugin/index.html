@@ -31,6 +31,18 @@
 
         <div id="last-error" class="notice notice--error" hidden></div>
 
+        <!-- Developer affordance, shown only when config.json sets devTools.
+             Not an MCP tool: the AI cannot create documents. -->
+        <p id="grant-status" class="grant" hidden></p>
+        <div id="dev-tools" class="devbox" hidden>
+          <span class="devbox__label">Developer</span>
+          <button id="demo-doc" type="button" class="btn">Create demo document</button>
+          <p class="devbox__hint">
+            Builds <code>banner.psd</code> (1920×1080) with Background, Logo, Title,
+            Subtitle and CTA — the document the demo scenario expects.
+          </p>
+        </div>
+
         <dl class="stats">
           <div class="stats__row"><dt>Documents</dt><dd id="stat-docs">–</dd></div>
           <div class="stats__row"><dt>Active</dt><dd id="stat-active">–</dd></div>
@@ -46,6 +58,7 @@
       </section>
 
       <footer class="panel__footer">
+        <button id="grant-access" type="button" class="btn">Grant workspace access</button>
         <button id="toggle" type="button" class="btn btn--primary">Connect</button>
         <button id="ping" type="button" class="btn" disabled>Ping</button>
         <button id="save-config" type="button" class="btn" disabled>Save config</button>

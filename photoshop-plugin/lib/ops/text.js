@@ -30,21 +30,33 @@ function createTextLayer(ctx) {
     position: position,
   };
   if (params.font) options.fontName = params.font;
-  if (params.color) options.textColor = solidColor(doc, params.color);
 
-  var layer;
-  try {
-    layer = doc.createTextLayer(options);
-  } catch (err) {
-    // `createTextLayer` is the documented API for 24.2+; if it is missing the
-    // plugin must say so rather than silently producing an empty layer.
-    throw StudioError('UNSUPPORTED_OPERATION', 'This Photoshop build cannot create text layers via the DOM.', {
-      details: { document: doc.name, cause: (err && err.message) || String(err) },
+  // The colour has to exist before the layer is created, and building one is a
+  // round trip through Photoshop, so the whole call is deferred rather than
+  // creating the layer and colouring it afterwards — a layer that appears then
+  // turns colour is a worse outcome than one that appears already right.
+  return (params.color ? solidColor(doc, params.color) : Promise.resolve(null))
+    .then(function (textColor) {
+      if (textColor) options.textColor = textColor;
+      try {
+        return doc.createTextLayer(options);
+      } catch (err) {
+        // `createTextLayer` is the documented API for 24.2+; if it is missing the
+        // plugin must say so rather than silently producing an empty layer.
+        throw StudioError('UNSUPPORTED_OPERATION', 'This Photoshop build cannot create text layers via the DOM.', {
+          details: { document: doc.name, cause: (err && err.message) || String(err) },
+        });
+      }
+    })
+    // Same lazy-id behaviour as `createLayer`, so the id is waited for before the
+    // layer is described — otherwise `layerId` serialises as undefined.
+    .then(function (created) {
+      return ps.resolveCreatedLayer(doc, created);
+    })
+    .then(function (layer) {
+      if (params.width) setParagraphWidth(layer, params.width);
+      return textInfo(doc, layer);
     });
-  }
-
-  if (params.width) setParagraphWidth(layer, params.width);
-  return textInfo(doc, layer);
 }
 
 /** `get_text_layer` */
@@ -76,10 +88,15 @@ function updateTextLayer(ctx) {
 
   if (typeof params.fontSize === 'number') applyFontSize(layer, params.fontSize);
   if (params.font) applyFont(layer, params.font);
-  if (params.color) applyColor(layer, params.color);
   if (params.alignment) applyAlignment(layer, params.alignment);
 
-  return textInfo(doc, layer);
+  // Colour comes last and is awaited: it is the only write that has to go
+  // through Photoshop, and reading the layer back before it lands would report
+  // the previous colour as the result of this edit.
+  return (params.color ? applyColor(doc, layer, params.color) : Promise.resolve())
+    .then(function () {
+      return textInfo(doc, layer);
+    });
 }
 
 /** `set_text_position` */
@@ -91,8 +108,11 @@ function setTextPosition(ctx) {
 
   // The DOM positions from the text box origin, which is the top-left of the
   // text box, so the request coordinates can be used directly.
-  layers.translateBy(layer, ctx.params.x - originOf(layer).x, ctx.params.y - originOf(layer).y);
-  return textInfo(doc, layer);
+  return layers
+    .translateBy(layer, ctx.params.x - originOf(layer).x, ctx.params.y - originOf(layer).y)
+    .then(function () {
+      return textInfo(doc, layer);
+    });
 }
 
 /** `set_text_font_size` */
@@ -110,16 +130,31 @@ function setTextColor(ctx) {
   var layer = ps.findLayer(doc, ctx.params);
   ps.assertText(layer);
   ps.assertMutable(layer);
-  applyColor(layer, ctx.params.color);
-  return textInfo(doc, layer);
+  return applyColor(doc, layer, ctx.params.color).then(function () {
+    return textInfo(doc, layer);
+  });
 }
 
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
 
-/** Normalised text record for a layer object. */
+/**
+ * Normalised text record for a layer object.
+ *
+ * `currentColor` is asynchronous — the fill colour has to be read back with
+ * `batchPlay`, because the UXP DOM has no reliable text-colour getter. Returning
+ * its promise from a synchronous function serialises as `{}`, which the MCP
+ * server's result schema rejects, so every text operation looked like a failure
+ * even though Photoshop had applied it.
+ */
 function textInfo(doc, layer) {
+  return Promise.resolve(currentColor(layer)).then(function (color) {
+    return buildTextInfo(doc, layer, color);
+  });
+}
+
+function buildTextInfo(doc, layer, color) {
   var item = layer.textItem;
   var bounds = ps.boundsOf(layer);
   var parent = ps.parentOf(doc, layer.id);
@@ -129,11 +164,12 @@ function textInfo(doc, layer) {
     text: item ? String(item.contents) : '',
     font: currentFont(layer),
     fontSize: currentFontSize(layer, bounds),
-    color: currentColor(layer),
+    color: color,
     alignment: currentAlignment(item),
+
     width: bounds.width,
     height: bounds.height,
-    x: (parent ? 0 : 0) + bounds.x,
+    x: bounds.x,
     y: bounds.y,
   };
 }
@@ -161,11 +197,22 @@ function currentFontSize(layer, bounds) {
   return bounds && bounds.height > 0 ? ps.round(bounds.height / 1.4, 1) : 12;
 }
 
+/**
+ * Paragraph alignment, normalised to the four values the schema accepts.
+ *
+ * Photoshop exposes values outside that set (for example "justifyAll" or the
+ * default value read back as an empty string), and returning one of those made
+ * every text operation fail result validation. Anything unrecognised is omitted
+ * rather than passed through.
+ */
 function currentAlignment(item) {
   try {
     var raw = item && item.paragraphStyle ? String(item.paragraphStyle.alignment) : '';
-    var map = { LEFT: 'left', CENTER: 'center', RIGHT: 'right', JUSTIFY: 'justify' };
-    return map[raw.toUpperCase()] || raw.toLowerCase() || undefined;
+    var normalized = raw.toLowerCase().replace(/[^a-z]/g, '');
+    if (normalized === 'left' || normalized === 'center' || normalized === 'centre') return 'center' === normalized ? 'center' : 'left';
+    if (normalized === 'right') return 'right';
+    if (normalized.indexOf('justify') === 0) return 'justify';
+    return undefined;
   } catch (err) {
     return undefined;
   }
@@ -177,135 +224,143 @@ function currentAlignment(item) {
  * The DOM does not reliably expose text colour, so this reads it back with a
  * `textStyleRange` get. Verification depends on it, so it must not be faked.
  */
+/**
+ * Reads the layer's text colour from the DOM.
+ *
+ * This used to ask Photoshop with an `_obj: 'get'` descriptor aimed at
+ * `textLayer`. On Photoshop 26.11 that command answers with a modal
+ * "The 'Get' command is currently unavailable", which blocks the plugin
+ * indefinitely — every text operation timed out and the failure presented as a
+ * hung bridge rather than as a rejected descriptor.
+ *
+ * `TextItem.characterStyle.color` is a `SolidColor` straight from the DOM, so
+ * nothing has to be asked of Photoshop at all. Its channels follow the
+ * document's colour mode, hence the conversions.
+ */
 function currentColor(layer) {
-  return ps
-    .batchPlay([
-      {
-        _obj: 'get',
-        _target: [
-          {
-            _ref: 'textLayer',
-            _enum: 'ordinal',
-            _value: 'targetEnum',
-          },
-          { _ref: 'document', _enum: 'ordinal', _value: 'targetEnum' },
-        ],
-        _options: { dialogOptions: 'dontDisplay' },
-      },
-    ])
-    .then(function (result) {
-      var style = extractColor(result);
-      return style || { r: 0, g: 0, b: 0 };
-    })
-    .catch(function () {
-      return { r: 0, g: 0, b: 0 };
+  var fallback = { r: 0, g: 0, b: 0 };
+  try {
+    var item = layer && layer.textItem;
+    var style = item && item.characterStyle;
+    var color = style && style.color;
+    return Promise.resolve(color ? solidColorToRgb(color) : fallback);
+  } catch (err) {
+    return Promise.resolve(fallback);
+  }
+}
+
+/**
+ * A `SolidColor` as an RGB triple.
+ *
+ * The DOM returns a `SolidColor` whose only own property is `base` — a JSON
+ * string holding the descriptor, e.g.
+ * `{"desc":{"_obj":"RGBColor","red":255,"blue":255,"green":255}}`. Reading
+ * `.rgb`/`.cmyk` off it (as an ExtendScript-shaped object would allow) yields
+ * nothing at all, which is why colours came back as black no matter what was
+ * set. The structured properties are still consulted afterwards, for a build
+ * that does expose them.
+ */
+function solidColorToRgb(color) {
+  var descriptor = null;
+  var base = color && color.base;
+  if (typeof base === 'string') {
+    try {
+      descriptor = JSON.parse(base).desc;
+    } catch (err) {
+      descriptor = null;
+    }
+  } else if (base && typeof base === 'object') {
+    descriptor = base.desc;
+  }
+
+  if (descriptor && descriptor._obj === 'RGBColor') {
+    return { r: clampByte(descriptor.red), g: clampByte(descriptor.green), b: clampByte(descriptor.blue) };
+  }
+  if (descriptor && descriptor._obj === 'CMYKColor') {
+    var c = Number(descriptor.cyan) / 100;
+    var m = Number(descriptor.magenta) / 100;
+    var y = Number(descriptor.yellow) / 100;
+    var k = Number(descriptor.black) / 100;
+    return {
+      r: clampByte(255 * (1 - Math.min(1, c + k))),
+      g: clampByte(255 * (1 - Math.min(1, m + k))),
+      b: clampByte(255 * (1 - Math.min(1, y + k))),
+    };
+  }
+  if (descriptor && descriptor._obj === 'GrayColor') {
+    var gray = clampByte(Number(descriptor.gray) * 255);
+    return { r: gray, g: gray, b: gray };
+  }
+
+  if (color.rgb) {
+    var rgb = color.rgb;
+    return { r: clampByte(rgb.red), g: clampByte(rgb.green), b: clampByte(rgb.blue) };
+  }
+  if (color.cmyk) {
+    var cmyk = color.cmyk;
+    var cc = Number(cmyk.cyan) / 100;
+    var mm = Number(cmyk.magenta) / 100;
+    var yy = Number(cmyk.yellow) / 100;
+    var kk = Number(cmyk.black) / 100;
+    return {
+      r: clampByte(255 * (1 - Math.min(1, cc + kk))),
+      g: clampByte(255 * (1 - Math.min(1, mm + kk))),
+      b: clampByte(255 * (1 - Math.min(1, yy + kk))),
+    };
+  }
+  return { r: 0, g: 0, b: 0 };
+}
+
+/**
+ * The layer's `characterStyle`, or a clear refusal.
+ *
+ * Style writes address the layer the caller holds rather than the active text
+ * layer: a `textStyleRange` write aimed at
+ * `{_ref: 'textLayer', _enum: 'ordinal', _value: 'targetEnum'}` answers on
+ * Photoshop 26.11 with a modal "Could not complete the request because of a
+ * program error" that blocks the plugin until a human dismisses it, which made
+ * `set_text_color` hang rather than fail.
+ */
+function characterStyle(layer) {
+  var item = layer && layer.textItem;
+  var style = item && item.characterStyle;
+  if (!style) {
+    throw StudioError('NOT_A_TEXT_LAYER', 'This layer has no text style to modify.', {
+      details: { layerId: layer && layer.id },
     });
-}
-
-function extractColor(result) {
-  if (!Array.isArray(result)) return null;
-  for (var i = 0; i < result.length; i += 1) {
-    var node = result[i];
-    if (!node || typeof node !== 'object') continue;
-    if (node._obj === 'textStyleRange' || node.textStyle) {
-      var found = findColor(node);
-      if (found) return found;
-    }
   }
-  return null;
+  return style;
 }
 
-function findColor(node) {
-  var stack = [node];
-  while (stack.length > 0) {
-    var current = stack.pop();
-    if (!current || typeof current !== 'object') continue;
-    if (
-      typeof current.red === 'number' &&
-      typeof current.green === 'number' &&
-      typeof current.blue === 'number'
-    ) {
-      return { r: current.red, g: current.green, b: current.blue };
-    }
-    for (var key in current) {
-      if (Object.prototype.hasOwnProperty.call(current, key) && typeof current[key] === 'object') {
-        stack.push(current[key]);
-      }
-    }
-  }
-  return null;
-}
-
-/** Font size via the DOM, with a `textStyleRange` fallback. */
 function applyFontSize(layer, fontSize) {
   if (typeof fontSize !== 'number' || fontSize <= 0 || fontSize > 1296) {
     throw StudioError('INVALID_PARAMS', 'fontSize must be between 1 and 1296, received ' + fontSize);
   }
-  try {
-    if (layer.textItem && layer.textItem.characterStyle) {
-      layer.textItem.characterStyle.size = fontSize;
-      return;
-    }
-  } catch (err) {
-    /* fall through to batchPlay */
-  }
-  return applyTextStyle(layer, { size: fontSize });
+  characterStyle(layer).size = fontSize;
 }
 
 function applyFont(layer, font) {
-  try {
-    if (layer.textItem && layer.textItem.characterStyle) {
-      layer.textItem.characterStyle.font = font;
-      return;
-    }
-  } catch (err) {
-    /* fall through */
-  }
-  return applyTextStyle(layer, { fontName: font });
+  characterStyle(layer).font = font;
 }
 
 function applyAlignment(layer, alignment) {
   try {
-    if (layer.textItem && layer.textItem.paragraphStyle) {
-      layer.textItem.paragraphStyle.alignment = alignment;
-    }
+    var item = layer.textItem;
+    if (item && item.paragraphStyle) item.paragraphStyle.alignment = alignment;
   } catch (err) {
-    /* alignment is cosmetic in the MVP; never fail the edit over it */
+    // Alignment is cosmetic in the MVP; never fail the edit over it.
   }
 }
 
-/** Colour and font fallbacks both go through one `textStyleRange` write. */
-function applyTextStyle(layer, style) {
-  var item = layer.textItem;
-  var text = item ? String(item.contents) : '';
-  var descriptor = {
-    _obj: 'textStyleRange',
-    from: 0,
-    to: Math.max(1, text.length),
-  };
-  var textStyle = { _obj: 'textStyle' };
-  if (style.size !== undefined) textStyle.size = { _unit: 'pointsUnit', _value: style.size };
-  if (style.fontName !== undefined) textStyle.fontName = style.fontName;
-  if (style.color !== undefined) {
-    textStyle.color = { _obj: 'RGBColor', red: style.color.r, green: style.color.g, blue: style.color.b };
-  }
-  descriptor.textStyle = textStyle;
-
-  return ps.batchPlay([
-    {
-      _obj: 'set',
-      _target: [{ _ref: 'textLayer', _enum: 'ordinal', _value: 'targetEnum' }],
-      to: [descriptor],
-      _options: { dialogOptions: 'dontDisplay' },
-    },
-  ]);
-}
-
-function applyColor(layer, color) {
+/** Applies a colour to every character run of a text layer. */
+function applyColor(doc, layer, color) {
   var rgb = normalizeColor(color);
-  return applyTextStyle(layer, { color: rgb });
+  return withForegroundColor(rgb, function (solid) {
+    characterStyle(layer).color = solid;
+  });
 }
 
+/** `"#rrggbb"` or `{r,g,b}` to a clamped RGB triple. */
 function normalizeColor(color) {
   if (typeof color === 'string') {
     var hex = color.replace('#', '');
@@ -319,30 +374,92 @@ function normalizeColor(color) {
   if (!color || typeof color.r !== 'number') {
     throw StudioError('INVALID_COLOR', 'Expected {r,g,b} or "#rrggbb"');
   }
-  return {
-    r: clampByte(color.r),
-    g: clampByte(color.g),
-    b: clampByte(color.b),
-  };
+  return { r: clampByte(color.r), g: clampByte(color.g), b: clampByte(color.b) };
 }
 
 function clampByte(value) {
   return Math.max(0, Math.min(255, Math.round(Number(value) || 0)));
 }
 
-/** `SolidColor` for `createTextLayer`'s `textColor`. */
+/**
+ * Produces a `SolidColor` for the document's colour mode, restoring whatever the
+ * user had as the foreground colour afterwards.
+ *
+ * There is no direct way to build one on Photoshop 26.11:
+ *
+ *  - `app.solidColor(...)` does not exist;
+ *  - `new app.SolidColor(...)` accepts an argument and ignores it, always
+ *    producing white;
+ *  - `TextItem.characterStyle.color` rejects anything that is not a real
+ *    `SolidColor` ("'color' is of type object. Expecting type SolidColor"), so a
+ *    plain `{r,g,b}` cannot be assigned at all.
+ *
+ * The foreground colour *is* a real `SolidColor` and setting it with a
+ * `_ref: 'color'` descriptor is supported. So: set it, hand it over, put it back.
+ * The window in which the user's foreground colour differs is one batchPlay.
+ */
+function withForegroundColor(rgb, fn) {
+  var app = ps.app;
+  if (!app) {
+    return Promise.reject(
+      StudioError('UNSUPPORTED_OPERATION', 'This Photoshop build exposes no way to build a colour.', {
+        recoverable: false,
+      }),
+    );
+  }
+
+  var previous;
+  try {
+    previous = app.foregroundColor;
+  } catch (err) {
+    previous = undefined;
+  }
+
+  var restore = function () {
+    if (!previous) return Promise.resolve();
+    try {
+      app.foregroundColor = previous;
+    } catch (err) {
+      // The colour is cosmetic; failing the edit over the restore is worse.
+    }
+    return Promise.resolve();
+  };
+
+  return ps
+    .batchPlay([
+      {
+        _obj: 'set',
+        _target: [{ _ref: 'color', _property: 'foregroundColor' }],
+        to: { _obj: 'RGBColor', red: rgb.r, green: rgb.g, blue: rgb.b },
+        _options: { dialogOptions: 'dontDisplay' },
+      },
+    ])
+    .then(function () {
+      return fn(app.foregroundColor);
+    })
+    .then(
+      function (value) {
+        return restore().then(function () {
+          return value;
+        });
+      },
+      function (err) {
+        return restore().then(function () {
+          throw err;
+        });
+      },
+    );
+}
+
+/** A `SolidColor` for `createTextLayer`'s `textColor` option. */
 function solidColor(doc, color) {
   var rgb = normalizeColor(color);
-  try {
-    if (doc.solidColor) return doc.solidColor(rgb);
-  } catch (err) {
-    /* fall through */
-  }
-  try {
-    return ps.app.foregroundColor;
-  } catch (err) {
-    return rgb;
-  }
+  var captured = null;
+  return withForegroundColor(rgb, function (solid) {
+    captured = solid;
+  }).then(function () {
+    return captured;
+  });
 }
 
 /** `createTextLayer`'s `position` is the bottom-left of the text box. */
@@ -359,7 +476,9 @@ function setParagraphWidth(layer, width) {
       layer.textItem.convertToParagraphText();
       var bounds = ps.boundsOf(layer);
       if (bounds.width > 0 && bounds.width !== width) {
-        layers.scaleBy(layer, width / bounds.width, 1);
+        // Awaited: the caller describes the layer straight after, and reading the
+        // bounds before the scale lands reports the pre-resize width.
+        return layers.scaleBy(layer, width / bounds.width, 1);
       }
     }
   } catch (err) {

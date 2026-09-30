@@ -128,8 +128,9 @@ describe('plugin / shared contract', () => {
     walk('lib');
     for (const match of read('index.js').matchAll(/require\(['"]([^'"]+)['"]\)/g)) {
       const dependency = match[1]!;
+      // Host modules plus our own files — nothing from npm.
       expect(
-        dependency === 'uxp' || dependency.startsWith('./'),
+        dependency === 'uxp' || dependency === 'photoshop' || dependency.startsWith('./'),
         `index.js requires "${dependency}"`,
       ).toBe(true);
     }
@@ -151,24 +152,31 @@ describe('plugin / shared contract', () => {
     expect(ps).toContain('photoshopFailure');
   });
 
-  it('never calls batchPlay outside the operation modules and ps.js', () => {
+  it('never calls batchPlay outside the sanctioned files', () => {
+    // `lib/ps.js` is the wrapper that runs and inspects descriptors;
+    // `lib/ops/*` are the individual operations; `lib/demo.js` is the panel's
+    // demo-document builder, which is deliberately NOT an MCP tool.
+    const SANCTIONED = ['lib/ps.js', 'lib/demo.js'];
     const offenders: string[] = [];
+
     const walk = (dir: string): void => {
       for (const entry of readdirSync(join(pluginRoot, dir))) {
         const relative = `${dir}/${entry}`;
         if (statSync(join(pluginRoot, relative)).isDirectory()) {
+          if (entry === 'test') continue;
           walk(relative);
           continue;
         }
         if (!entry.endsWith('.js')) continue;
-        const source = read(relative);
-        if (source.includes('.batchPlay(') && !relative.startsWith('lib/ops/') && relative !== 'lib/ps.js') {
+        const code = stripComments(read(relative));
+        if (code.includes('.batchPlay(') && !relative.startsWith('lib/ops/') && !SANCTIONED.includes(relative)) {
           offenders.push(relative);
         }
       }
     };
     walk('lib');
-    if (read('index.js').includes('.batchPlay(')) offenders.push('index.js');
+    if (stripComments(read('index.js')).includes('.batchPlay(')) offenders.push('index.js');
+
     expect(offenders, `batchPlay outside the sanctioned files: ${offenders.join(', ')}`).toEqual([]);
   });
 

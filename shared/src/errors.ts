@@ -29,6 +29,12 @@ export const ERROR_CODES = [
   'INVALID_COLOR',
   // --- files ---------------------------------------------------------------
   'PATH_NOT_ALLOWED',
+  /**
+   * The plugin sandbox has not been granted access to the workspace folder.
+   * Distinct from `PATH_NOT_ALLOWED` on purpose: nothing is wrong with the path,
+   * and the fix is a button in the panel rather than a change to the plan.
+   */
+  'WORKSPACE_NOT_GRANTED',
   'FILE_NOT_FOUND',
   'FILE_EXISTS',
   'EXPORT_FAILED',
@@ -114,6 +120,8 @@ export function defaultRecoverable(code: ErrorCode): boolean {
     case 'FONT_NOT_AVAILABLE':
     case 'INVALID_COLOR':
     case 'FILE_EXISTS':
+    // Fixable by the user, without changing the plan: grant the folder.
+    case 'WORKSPACE_NOT_GRANTED':
     case 'EXPORT_FAILED':
     case 'STEP_FAILED':
     case 'VERIFICATION_FAILED':

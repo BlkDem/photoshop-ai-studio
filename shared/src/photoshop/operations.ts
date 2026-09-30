@@ -99,6 +99,31 @@ export const OutputPathSchema = z
       'Paths outside the workspace are rejected.',
   );
 
+/**
+ * A file Photoshop wrote inside its own sandbox, awaiting publication.
+ *
+ * UXP plugins cannot write to a caller-chosen path: `localFileSystem: "request"`
+ * only grants a folder the user picked, and that needs a gesture, which a
+ * headless export cannot produce. The plugin therefore writes to
+ * `plugin-data:/` and the MCP server — which owns the filesystem — moves the
+ * file into the workspace.
+ *
+ * `nativePath` is the plugin's absolute path and is therefore **only** meaningful
+ * to the process reading it; it is never shown to a model or written into a plan.
+ */
+export const StagedFileSchema = z.object({
+  nativePath: z.string().describe('Absolute path inside the plugin sandbox.'),
+  fileName: z.string().describe('Name the plugin staged the file under.'),
+});
+
+/** The bridge-level result of a file-producing operation, before publication. */
+export const StagedExportResultSchema = z.object({
+  path: z.string().describe('The path that was requested, for logging and diffing.'),
+  format: ExportFormatSchema,
+  overwritten: z.boolean(),
+  staged: StagedFileSchema,
+});
+
 export const ExportResultSchema = z.object({
   path: z.string(),
   format: ExportFormatSchema,
@@ -107,6 +132,7 @@ export const ExportResultSchema = z.object({
 });
 
 export type ExportResult = z.infer<typeof ExportResultSchema>;
+export type StagedFile = z.infer<typeof StagedFileSchema>;
 
 export const PreviewResultSchema = z.object({
   mimeType: z.enum(['image/png']),

@@ -7,8 +7,14 @@
  *    method. The UXP equivalent is `document.saveAs.<format>(entry, options, asCopy)`
  *    — an *object of functions*, not a callable method. This is why exports go
  *    through `saveAs`.
- *  - `placeEvent` needs a **session token**, not a path, for its `_path`
- *    property: `fs.createSessionToken(entry)`.
+ *  - **`document.exportDocument` does not exist in UXP.** It is an ExtendScript
+ *    method. The UXP equivalent is `document.saveAs.<format>(entry, options,
+ *    asCopy)` — an *object of functions*, not a callable method. This is why
+ *    exports go through `saveAs`, `ps.entryForWriting`, and the plugin's own
+ *    staging folder.
+ *  - There is no working `placeEvent`: it refuses a file from the plugin
+ *    sandbox. `place_image` opens the image as a document and copies its layers
+ *    instead — see `placeInto`.
  */
 'use strict';
 
@@ -21,36 +27,143 @@ function placeImage(ctx) {
   var doc = ps.resolveDocument(ctx.params.documentId);
   var params = ctx.params;
 
-  return ps.entryForReading(params.path, ctx.config).then(function (entry) {
-    var token = ps.fs.createSessionToken(entry);
+  return openSource(params, ctx.config).then(function (source) {
+    return placeInto(doc, source).then(function (placed) {
+      if (params.name) placed.name = params.name;
 
-    return ps
-      .batchPlay([
-        {
-          _obj: 'placeEvent',
-          _target: [{ _ref: 'document', _enum: 'ordinal', _value: 'targetEnum' }],
-          _options: { dialogOptions: 'dontDisplay' },
-          freeTransformCenterState: { _enum: 'quadCenterState', _value: 'QCSAverage' },
-          _path: token,
-        },
-      ])
-      .then(function () {
-        var placed = topLayer(doc);
-        if (!placed) {
-          throw StudioError('STEP_FAILED', 'Photoshop placed the image but no new layer appeared.', {
-            recoverable: true,
-          });
-        }
-        if (params.name) placed.name = params.name;
-
-        var bounds = ps.boundsOf(placed);
-        if (params.fit && (params.fit.width || params.fit.height)) {
-          fitLayer(placed, doc, params.fit, bounds);
-        }
+      var bounds = ps.boundsOf(placed);
+      var fitted = params.fit && (params.fit.width || params.fit.height)
+        ? fitLayer(placed, doc, params.fit, bounds)
+        : Promise.resolve();
+      return fitted.then(function () {
         var parent = ps.parentOf(doc, placed.id);
         return ps.layerInfo(placed, parent ? parent.id : null);
       });
+    });
   });
+}
+
+/**
+ * Copies an image's layers into the target document.
+ *
+ * `placeEvent` is the descriptor to reach for first, and it does not work here:
+ * on Photoshop 26.11 / UXP 9.0.2 it answers "The user cancelled the operation"
+ * for a file in the plugin sandbox — the only place a plugin may write without
+ * a permission grant — for every descriptor variant tried. Opening the image as
+ * a scratch document and copying its layers does work.
+ *
+ * The scratch document is closed on both paths, so a failure never leaves the
+ * user with a stray window and a half-finished operation.
+ */
+function placeInto(doc, source) {
+  var scratch;
+  var settled = function (fn) {
+    return function (value) {
+      return ps.closeScratchDocument(scratch).then(function () {
+        return fn(value);
+      });
+    };
+  };
+
+  return ps
+    .openDocument(source.entry, source.fileName)
+    .then(function (opened) {
+      scratch = opened;
+      var layers = ps.layerObjects(opened);
+      if (!layers.length) {
+        // `app.open` can resolve before the DOM exposes the layer collection,
+        // so this is worth retrying once rather than reporting a phantom
+        // "no layers" for an image that plainly has one.
+        return new Promise(function (resolve) {
+          setTimeout(resolve, 250);
+        })
+          .then(function () {
+            return ps.layerObjects(opened);
+          })
+          .then(function (retry) {
+            if (!retry.length) {
+              throw StudioError(
+                'STEP_FAILED',
+                'The image opened but reported no layers (name=' + opened.name + ', layers=' +
+                  ((opened.layers && opened.layers.length) || 0) + ').',
+                { recoverable: true },
+              );
+            }
+            return retry;
+          });
+      }
+      // Bottom to top, so the image's topmost layer ends up topmost here too.
+      return layers.reduce(function (chain, layer) {
+        return chain.then(function () {
+          return layer.copy().then(function () {
+            return doc.paste();
+          });
+        });
+      }, Promise.resolve())
+        .then(function (pasted) {
+          // `Document.paste()` resolves to the new layer on some builds and to
+          // nothing on others, where the paste simply becomes the active layer.
+          if (pasted) return pasted;
+          var active = doc.activeLayers;
+          return (active && active[0]) || null;
+        });
+    })
+    .then(
+      settled(function (pasted) {
+        if (!pasted) {
+          throw StudioError('STEP_FAILED', 'Photoshop pasted no layer for the image.', { recoverable: true });
+        }
+        return centreOnCanvas(doc, pasted).then(function () {
+          return pasted;
+        });
+      }),
+      settled(function (err) {
+        throw err;
+      }),
+    );
+}
+
+/** Pasting lands in the middle of the canvas; the API contract reports a position. */
+function centreOnCanvas(doc, layer) {
+  if (!layer) return Promise.resolve();
+  var bounds = ps.boundsOf(layer);
+  return layers.translateBy(
+    layer,
+    Math.round(doc.width / 2 - (bounds.x + bounds.width / 2)),
+    Math.round(doc.height / 2 - (bounds.y + bounds.height / 2)),
+  );
+}
+
+/**
+ * Resolves the image to place.
+ *
+ * The bytes the server sent over the bridge are the normal path: the plugin's
+ * sandbox cannot open a workspace file without a grant the user approves in the
+ * panel, and an AI-driven plan should not be able to summon a file picker. A
+ * granted workspace is still preferred when one exists, since it skips staging
+ * a copy of every image.
+ */
+function openSource(params, config) {
+  if (typeof params.path === 'string' && params.path && ps.currentWorkspaceGrant(config)) {
+    return ps.entryForReading(params.path, config).then(function (entry) {
+      return { entry: entry, fileName: params.path };
+    });
+  }
+  var named = typeof params.path === 'string' && params.path;
+  if (!params.data || !params.data.base64) {
+    throw StudioError(
+      named ? 'WORKSPACE_NOT_GRANTED' : 'INVALID_PARAMS',
+      named
+        ? 'This image has to be sent over the bridge because Photoshop has not granted access to the workspace.'
+        : 'place_image needs the path of an image in the workspace.',
+      { recoverable: true, details: { requested: params.path } },
+    );
+  }
+  return ps
+    .materialize({ fileName: params.data.fileName || 'input.png', base64: params.data.base64 })
+    .then(function (staged) {
+      return { entry: staged.entry, fileName: staged.fileName };
+    });
 }
 
 /** `resize_layer` */
@@ -80,12 +193,18 @@ function resizeLayer(ctx) {
   var offsetX = anchorOffset(doc.width, targetWidth, anchor, 'x');
   var offsetY = anchorOffset(doc.height, targetHeight, anchor, 'y');
 
-  layers.scaleBy(layer, factorX, factorY);
-  var after = ps.boundsOf(layer);
-  layers.translateBy(layer, offsetX - after.x, offsetY - after.y);
-
-  var parent = ps.parentOf(doc, layer.id);
-  return ps.layerInfo(layer, parent ? parent.id : null);
+  // Awaited in order: reading the bounds before the scale settles reports the
+  // old size, which then anchors the translate in the wrong place.
+  return layers
+    .scaleBy(layer, factorX, factorY)
+    .then(function () {
+      var after = ps.boundsOf(layer);
+      return layers.translateBy(layer, offsetX - after.x, offsetY - after.y);
+    })
+    .then(function () {
+      var parent = ps.parentOf(doc, layer.id);
+      return ps.layerInfo(layer, parent ? parent.id : null);
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -99,7 +218,8 @@ function exportPng(ctx) {
   var path = resolveOutput(params.path, 'export.png', ctx.config);
 
   return withDownscale(doc, params).then(function () {
-    return ps.entryForWriting(path, params.overwrite, ctx.config).then(function (entry) {
+    return ps.entryForWriting(path, params.overwrite, ctx.config).then(function (staged) {
+      var entry = staged.entry;
       return doc
         .saveAs.png(
           entry,
@@ -110,7 +230,7 @@ function exportPng(ctx) {
           true,
         )
         .then(function () {
-          return { path: path, format: 'png', overwritten: params.overwrite === true };
+          return { path: path, format: 'png', overwritten: params.overwrite === true, staged: staged.staged };
         });
     });
   });
@@ -123,7 +243,8 @@ function exportJpg(ctx) {
   var path = resolveOutput(params.path, 'export.jpg', ctx.config);
 
   return withDownscale(doc, params).then(function () {
-    return ps.entryForWriting(path, params.overwrite, ctx.config).then(function (entry) {
+    return ps.entryForWriting(path, params.overwrite, ctx.config).then(function (staged) {
+      var entry = staged.entry;
       return doc
         .saveAs.jpg(
           entry,
@@ -135,7 +256,7 @@ function exportJpg(ctx) {
           true,
         )
         .then(function () {
-          return { path: path, format: 'jpg', overwritten: params.overwrite === true };
+          return { path: path, format: 'jpg', overwritten: params.overwrite === true, staged: staged.staged };
         });
     });
   });
@@ -147,11 +268,12 @@ function savePsd(ctx) {
   var params = ctx.params;
   var path = resolveOutput(params.path, 'document.psd', ctx.config);
 
-  return ps.entryForWriting(path, params.overwrite, ctx.config).then(function (entry) {
+  return ps.entryForWriting(path, params.overwrite, ctx.config).then(function (staged) {
+    var entry = staged.entry;
     return doc
       .saveAs.psd(entry, { layers: true, embedColorProfile: true }, params.asCopy !== false)
       .then(function () {
-        return { path: path, format: 'psd', overwritten: params.overwrite === true };
+        return { path: path, format: 'psd', overwritten: params.overwrite === true, staged: staged.staged };
       });
   });
 }
@@ -181,11 +303,12 @@ function saveDocument(ctx) {
   }
 
   var path = resolveOutput(params.path, 'document.psd', ctx.config);
-  return ps.entryForWriting(path, params.overwrite, ctx.config).then(function (entry) {
+  return ps.entryForWriting(path, params.overwrite, ctx.config).then(function (staged) {
+    var entry = staged.entry;
     return doc
       .saveAs.psd(entry, { layers: true }, params.asCopy !== false)
       .then(function () {
-        return { path: path, overwritten: params.overwrite === true };
+        return { path: path, overwritten: params.overwrite === true, staged: staged.staged };
       });
   });
 }
@@ -203,16 +326,16 @@ function renderPreview(ctx) {
   var width = Math.max(1, Math.round(doc.width * scale));
   var height = Math.max(1, Math.round(doc.height * scale));
 
-  return ps.fs
-    .getTemporaryFolder()
-    .then(function (folder) {
-      var target = folder.nativePath + '/ai-studio-preview-' + Date.now() + '.png';
-      var url = ps.toFileUrl(target);
-      return ps.fs.createEntryWithUrl(url, { overwrite: true });
-    })
-    .then(function (entry) {
-      return doc.saveAs.png(entry, { compression: 3 }, true).then(function () {
-        return entry.read({ format: ps.formats.binary });
+  // Staged through the shared helper rather than `getTemporaryFolder()`: that
+  // folder's `nativePath` is inside the virtual plugin storage, and
+  // `createEntryWithUrl` on it answers "failed to get the parent folder" — a
+  // preview is transport payload, so it goes to `plugin-data:/` and straight
+  // back over the wire.
+  return ps
+    .stageEntry('.png', 'plugin-data:/')
+    .then(function (staged) {
+      return doc.saveAs.png(staged.entry, { compression: 3 }, true).then(function () {
+        return staged.entry.read({ format: ps.formats.binary });
       });
     })
     .then(function (buffer) {
@@ -276,7 +399,6 @@ function withDownscale(doc, params) {
     });
 }
 
-/** Absolute destination inside the configured output directory. */
 function resolveOutput(path, defaultName, config) {
   if (path) return path;
   var root = String(config.outputDir || config.workspaceRoot || '').replace(/[\\/]+$/, '');
@@ -300,14 +422,15 @@ function fitLayer(layer, doc, fit, before) {
   } else if (fit.height) {
     factorX = factorY = fit.height / Math.max(1, before.height);
   }
-  layers.scaleBy(layer, factorX, factorY);
-  var after = ps.boundsOf(layer);
-  var anchor = fit.anchor || 'center';
-  layers.translateBy(
-    layer,
-    anchorOffset(doc.width, after.width, anchor, 'x') - after.x,
-    anchorOffset(doc.height, after.height, anchor, 'y') - after.y,
-  );
+  return layers.scaleBy(layer, factorX, factorY).then(function () {
+    var after = ps.boundsOf(layer);
+    var anchor = fit.anchor || 'center';
+    return layers.translateBy(
+      layer,
+      anchorOffset(doc.width, after.width, anchor, 'x') - after.x,
+      anchorOffset(doc.height, after.height, anchor, 'y') - after.y,
+    );
+  });
 }
 
 function anchorOffset(canvas, size, anchor, axis) {

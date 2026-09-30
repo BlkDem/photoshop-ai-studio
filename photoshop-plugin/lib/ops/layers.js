@@ -34,24 +34,50 @@ function createLayer(ctx) {
   var doc = ps.resolveDocument(ctx.params.documentId);
   var params = ctx.params;
 
-  var layer = doc.createLayer({ name: params.name });
-  ps.assertMutable(layer);
+  var created = doc.createLayer({ name: params.name });
 
-  var width = params.width || doc.width;
-  var height = params.height || doc.height;
-  var current = ps.boundsOf(layer);
-  var targetX = typeof params.x === 'number' ? params.x : Math.round((doc.width - width) / 2);
-  var targetY = typeof params.y === 'number' ? params.y : Math.round((doc.height - height) / 2);
+  return ps.resolveCreatedLayer(doc, created).then(function (layer) {
+    ps.assertMutable(layer);
 
-  if (width !== current.width || height !== current.height) {
-    scaleTo(layer, current, width, height);
-  }
-  translateBy(layer, targetX - current.x, targetY - current.y);
+    var width = params.width || doc.width;
+    var height = params.height || doc.height;
+    var current = ps.boundsOf(layer);
+    var targetX = typeof params.x === 'number' ? params.x : Math.round((doc.width - width) / 2);
+    var targetY = typeof params.y === 'number' ? params.y : Math.round((doc.height - height) / 2);
 
-  if (typeof params.opacity === 'number') layer.opacity = params.opacity;
-  if (typeof params.visible === 'boolean') layer.visible = params.visible;
+    // Every geometry step is awaited in turn: `scaleTo` and `translateBy` both
+    // go through `batchPlay`, and describing the layer before they settle
+    // reports the position and size the layer had when it was born.
+    var geometry = width !== current.width || height !== current.height
+      ? scaleTo(layer, current, width, height)
+      : Promise.resolve();
 
-  return describe(doc, layer);
+    return geometry
+      .then(function () {
+        return translateBy(layer, targetX - current.x, targetY - current.y);
+      })
+      .then(function () {
+        if (typeof params.opacity === 'number') layer.opacity = params.opacity;
+        if (typeof params.visible === 'boolean') layer.visible = params.visible;
+        return describe(doc, layer);
+      });
+  });
+}
+
+/** `create_group` — also waits for the group's id before reporting it. */
+function createGroup(ctx) {
+  var doc = ps.resolveDocument(ctx.params.documentId);
+  var params = ctx.params;
+  var created = doc.createLayerGroup({ name: params.name });
+
+  return ps.resolveCreatedLayer(doc, created).then(function (group) {
+    if (params.layer) {
+      var member = ps.findLayer(doc, params.layer);
+      ps.assertMutable(member);
+      member.move(group, placement('placeInside'));
+    }
+    return describe(doc, group);
+  });
 }
 
 /** `delete_layer` — destructive, gated upstream by the safety layer. */
@@ -92,8 +118,12 @@ function moveLayer(ctx) {
   if (typeof ctx.params.y === 'number') dy = ctx.params.y - before.y;
   else if (typeof ctx.params.dy === 'number') dy = ctx.params.dy;
 
-  if (dx !== 0 || dy !== 0) translateBy(layer, dx, dy);
-  return describe(doc, layer);
+  // Awaited: the transform is a `batchPlay` promise, and reading the layer back
+  // before it settles returns the position from *before* the move. The op then
+  // reports success with a stale position and no verification can catch it.
+  return translateBy(layer, dx, dy).then(function () {
+    return describe(doc, layer);
+  });
 }
 
 /** `set_layer_visibility` */
@@ -116,20 +146,6 @@ function setLayerOpacity(ctx) {
   }
   layer.opacity = value;
   return describe(doc, layer);
-}
-
-/** `create_group` — optionally moving an existing layer inside. */
-function createGroup(ctx) {
-  var doc = ps.resolveDocument(ctx.params.documentId);
-  var params = ctx.params;
-
-  var group = doc.createLayerGroup({ name: params.name });
-  if (params.layer) {
-    var member = ps.findLayer(doc, params.layer);
-    ps.assertMutable(member);
-    member.move(group, placement('placeInside'));
-  }
-  return describe(doc, group);
 }
 
 /** `move_layer_to_group` */
@@ -155,10 +171,18 @@ function reorderLayer(ctx) {
   ps.assertMutable(layer);
 
   var where = ctx.params.placement;
+  // `document.layers` is top-first, so the stack's top is index 0.
+  var stack = doc.layers || [];
+  if (stack.length < 2) return describe(doc, layer);
+
   if (where === 'placeAtEnd') {
-    layer.move(undefined, placement('placeAtEnd'));
+    // `layer.move` rejects an undefined target, so "to the end" is expressed as
+    // "before the current top layer".
+    var top = stack[0];
+    if (top.id !== layer.id) layer.move(top, placement('placeBefore'));
   } else if (where === 'placeAtBeginning') {
-    layer.move(undefined, placement('placeAtBeginning'));
+    var bottom = stack[stack.length - 1];
+    if (bottom.id !== layer.id) layer.move(bottom, placement('placeAfter'));
   } else {
     if (!ctx.params.target) {
       throw StudioError('INVALID_PARAMS', 'reorder_layer with placement "' + where + '" requires a target layer.');
@@ -180,58 +204,75 @@ function describe(doc, layer) {
 }
 
 /**
- * `layer.translate` is the documented DOM method, but it is absent on some
- * builds; the `transform` descriptor is the fallback. Both run in the caller's
- * modal scope.
+ * The `transform` descriptor, addressed by layer id.
+ *
+ * Two things were wrong here and both failed *quietly*, which is why a run could
+ * report `move_layer: succeeded` for a layer that had not moved an pixel:
+ *
+ *  - `{_ref: 'layer', _enum: 'ordinal', _value: 'targetEnum'}` addresses the
+ *    **active** layer, not the one the caller is holding. On this build that
+ *    silently moved whatever happened to be selected.
+ *  - `layer.translate()` existed and returned without throwing while doing
+ *    nothing, so the early `return` claimed success.
+ *
+ * Addressing the layer by `_id` is unambiguous, and the result is checked by the
+ * caller reading the bounds back, so a silent no-op surfaces as a failed
+ * verification rather than a green run.
  */
 function translateBy(layer, dx, dy) {
-  if (typeof layer.translate === 'function') {
-    try {
-      layer.translate(dx, dy);
-      return;
-    } catch (err) {
-      // Fall through to batchPlay.
-    }
-  }
-  return ps.batchPlay([
-    {
-      _obj: 'transform',
-      _target: [{ _ref: 'layer', _enum: 'ordinal', _value: 'targetEnum' }],
-      _options: { dialogOptions: 'dontDisplay' },
-      freeTransformCenterState: { _enum: 'quadCenterState', _value: 'QCSAverage' },
-      offset: { _obj: 'offset', horizontal: ps.round(dx, 2), vertical: ps.round(dy, 2) },
-    },
-  ]);
+  return withActiveLayer(layer, function () {
+    return layer.translate(ps.round(dx, 2), ps.round(dy, 2));
+  });
 }
 
 /**
- * Scales a layer by a factor using the DOM's `scale`, falling back to `transform`.
- * Percentages are what the DOM expects, not ratios.
+ * Runs `fn` with `layer` selected.
+ *
+ * `Layer.translate()` and `Layer.scale()` act on the **active** layer. Given a
+ * layer that is not selected they return normally and change nothing — a silent
+ * no-op that made `move_layer` report success for layers that had not moved a
+ * pixel, and made a whole §29 demo "succeed" with the artwork still where it
+ * started.
+ *
+ * The `transform` descriptor is not an escape hatch: every form of it tried on
+ * Photoshop 26.11 / UXP 9.0.2 — `ordinal/targetEnum` and `_id`, with and without
+ * `_options`, with and without pixel units — left the layer untouched.
+ *
+ * The cost is that the selection changes, which the user can see. It is restored
+ * only where we can do so without guessing; a plan that moves layers will leave
+ * the last one it touched selected.
+ */
+function withActiveLayer(layer, fn) {
+  return Promise.resolve()
+    .then(function () {
+      var document = layer.parent || (ps.app && ps.app.activeDocument);
+      if (document && document.activeLayers) document.activeLayers = [layer];
+      return fn();
+    })
+    .then(function (result) {
+      return result;
+    })
+    .catch(function (err) {
+      throw StudioError('STEP_FAILED', 'Could not transform "' + layer.name + '": ' + ((err && err.message) || String(err)), {
+        recoverable: true,
+      });
+    });
+}
+
+/**
+ * Scales a layer by a factor.
+ *
+ * The DOM's `scale` takes percentages, not ratios.
  */
 function scaleBy(layer, factorX, factorY) {
-  var px = ps.round(factorX * 100, 2);
-  var py = ps.round(factorY * 100, 2);
-  if (typeof layer.scale === 'function') {
-    try {
-      layer.scale(px, py);
-      return;
-    } catch (err) {
-      // Fall through.
-    }
-  }
-  return ps.batchPlay([
-    {
-      _obj: 'transform',
-      _target: [{ _ref: 'layer', _enum: 'ordinal', _value: 'targetEnum' }],
-      _options: { dialogOptions: 'dontDisplay' },
-      scale: { _obj: 'scale', horizontal: px, vertical: py },
-    },
-  ]);
+  return withActiveLayer(layer, function () {
+    return layer.scale(ps.round(factorX * 100, 2), ps.round(factorY * 100, 2));
+  });
 }
 
 function scaleTo(layer, current, width, height) {
-  if (current.width <= 0 || current.height <= 0) return;
-  scaleBy(layer, width / current.width, height / current.height);
+  if (current.width <= 0 || current.height <= 0) return Promise.resolve();
+  return scaleBy(layer, width / current.width, height / current.height);
 }
 
 /** Resolves an `ElementPlacement` enum name across UXP versions. */

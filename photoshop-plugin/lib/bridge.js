@@ -31,13 +31,16 @@
 var adapter = require('./adapter.js');
 var errors = require('./errors.js');
 var Logger = require('./logger.js').Logger;
-var versions = require('uxp').versions;
+var uxp = require('uxp');
+var versions = uxp.versions;
+var storage = uxp.storage;
 
 var PROTOCOL_VERSION = 1;
 
 var state = {
   socket: null,
   config: null,
+  configError: null,
   attempt: 0,
   wantConnected: false,
   handlers: {},
@@ -76,6 +79,15 @@ Logger.setRemoteSink(sendLog);
 // lifecycle
 // ---------------------------------------------------------------------------
 
+/**
+ * Reads `config.json` from the plugin folder.
+ *
+ * Returns a promise that always resolves: a missing or malformed config must
+ * leave the plugin running with defaults, not dead. Sequencing matters — `connect`
+ * waits for this before opening the socket, because an operation that arrives
+ * before the config has loaded would run with an empty workspace root and fail
+ * every filesystem operation.
+ */
 function loadConfig(overrides) {
   var config = {
     bridgeUrl: 'ws://localhost:3002/bridge',
@@ -84,39 +96,73 @@ function loadConfig(overrides) {
     reconnectBaseMs: 500,
     reconnectMaxMs: 15000,
   };
+  applyOverrides(config, overrides);
+  state.config = config;
 
-  // config.json sits next to the plugin; fs.getPluginFolder() is read-only and
-  // needs no permission beyond `localFileSystem: "plugin"`.
-  try {
-    var fs = require('uxp').storage.localFileSystem;
-    fs.getPluginFolder()
-      .then(function (folder) {
-        var entry = folder.getEntry('config.json');
-        return entry.read({ format: require('uxp').storage.formats.utf8 });
-      })
-      .then(function (text) {
-        var parsed = JSON.parse(text);
-        for (var key in config) {
-          if (Object.prototype.hasOwnProperty.call(parsed, key) && parsed[key] !== undefined && parsed[key] !== null) {
-            config[key] = parsed[key];
-          }
+  var fs = storage.localFileSystem;
+  var formatsUtf8 = storage.formats.utf8;
+
+  var text0 = null;
+
+  /**
+   * Reads `config.json` from the plugin's own folder.
+   *
+   * Two strategies, because `Folder.getEntry()` did not return a readable entry
+   * on Photoshop 26.11 / UXP 9.0.2 — the error surfaced as
+   * "getEntry(...).read is not a function". `plugin:/` is the documented URL for
+   * the folder holding `manifest.json` and works regardless; the folder walk is
+   * kept as a fallback, guarded so a host that changes the shape cannot turn a
+   * configuration problem into a dead plugin.
+   */
+  function readPluginFile(name) {
+    return fs
+      .getEntryWithUrl('plugin:/' + name)
+      .then(function (entry) {
+        if (!entry || typeof entry.read !== 'function') {
+          throw new Error('getEntryWithUrl("plugin:/' + name + '") did not return a readable entry');
         }
-        applyOverrides(config, overrides);
-        state.config = config;
-        emit('config', config);
-        Logger.info('configuration loaded', { bridgeUrl: config.bridgeUrl, workspaceRoot: config.workspaceRoot });
+        return entry.read({ format: storage.formats.utf8 });
       })
-      .catch(function (err) {
-        Logger.warn('config.json unreadable, using defaults: ' + ((err && err.message) || String(err)));
-        applyOverrides(config, overrides);
-        state.config = config;
-        emit('config', config);
+      .catch(function (firstError) {
+        return fs.getPluginFolder().then(function (folder) {
+          var entry = folder && typeof folder.getEntry === 'function' ? folder.getEntry(name) : null;
+          if (!entry || typeof entry.read !== 'function') {
+            throw new Error(
+              'could not read ' + name + ' from the plugin folder (' + (firstError && firstError.message) + ')',
+            );
+          }
+          return entry.read({ format: storage.formats.utf8 });
+        });
       });
-  } catch (err) {
-    Logger.error('could not read plugin configuration: ' + ((err && err.message) || String(err)));
   }
 
-  return config;
+  return readPluginFile('config.json')
+    .then(function (text) {
+      text0 = text;
+      var parsed = JSON.parse(text);
+      for (var key in parsed) {
+        // `_`-prefixed keys are documentation, not settings.
+        if (key.charAt(0) === '_') continue;
+        if (parsed[key] === undefined || parsed[key] === null) continue;
+        config[key] = parsed[key];
+      }
+      applyOverrides(config, overrides);
+      state.config = config;
+      emit('config', config);
+      Logger.info('configuration loaded', { bridgeUrl: config.bridgeUrl, workspaceRoot: config.workspaceRoot });
+    })
+    .catch(function (err) {
+      // Remembered and reported in `hello`: a config failure is otherwise
+      // invisible, because the plugin is still running and still connected.
+      state.configError = ((err && err.message) || String(err)) + ' | read=' + typeof text0;
+      Logger.warn('config.json unreadable, using defaults: ' + state.configError);
+      applyOverrides(config, overrides);
+      state.config = config;
+      emit('config', config);
+    })
+    .then(function () {
+      return config;
+    });
 }
 
 function applyOverrides(config, overrides) {
@@ -129,15 +175,22 @@ function applyOverrides(config, overrides) {
 }
 
 function connect(overrides) {
-  if (state.config) applyOverrides(state.config, overrides);
-  else loadConfig(overrides);
-
   state.wantConnected = true;
-  open();
+  // Sequenced deliberately: opening the socket first would let the first
+  // operation run before the workspace root is known.
+  loadConfig(overrides).then(function (config) {
+    open();
+  });
 }
 
 function open() {
-  var config = state.config || loadConfig();
+  // `connect` sequences loadConfig before open, so state.config is always set
+  // here; the guard keeps a direct `open()` from reading `undefined`.
+  var config = state.config;
+  if (!config) {
+    Logger.error('open() called before the configuration was loaded');
+    return;
+  }
   var socket;
 
   Logger.info('connecting to ' + config.bridgeUrl);
@@ -156,19 +209,42 @@ function open() {
   socket.onopen = function () {
     state.attempt = 0;
     Logger.info('socket open, sending hello');
-    send({
+    var sent = send({
       v: PROTOCOL_VERSION,
       type: 'hello',
       payload: {
         pluginId: 'com.blkdem.photoshop-ai-studio',
         pluginVersion: '0.1.0',
-        uxpVersion: versions ? String(versions.uxp) : 'unknown',
+        uxpVersion: uxpVersion(),
         hostApp: 'photoshop',
         hostVersion: hostVersion(),
         protocolVersion: PROTOCOL_VERSION,
         supports: adapter.SUPPORTED,
+        // Reported so a mismatch is visible from the MCP server's log instead of
+        // surfacing later as a puzzling "workspaceRoot is not configured" on the
+        // first export. Cross-OS setups get this wrong constantly.
+        config: {
+          workspaceRoot: config.workspaceRoot || null,
+          outputDir: config.outputDir || null,
+          error: state.configError || null,
+        },
       },
     });
+    // `connect` fires HERE, not on an inbound hello frame. This plugin is the
+    // side that initiates, so nothing would ever arrive to trigger it otherwise —
+    // and every listener (the panel's status badge, startup diagnostics) would
+    // silently wait for an event that cannot happen.
+    if (sent) {
+      emit('status', { connected: true, state: 'connected' });
+      emit('connect', {
+        connected: true,
+        pluginId: 'com.blkdem.photoshop-ai-studio',
+        pluginVersion: '0.1.0',
+        uxpVersion: uxpVersion(),
+        hostApp: 'photoshop',
+        hostVersion: hostVersion(),
+      });
+    }
   };
 
   socket.onmessage = function (event) {
@@ -279,13 +355,46 @@ function handle(frame) {
 // state reporting
 // ---------------------------------------------------------------------------
 
+/**
+ * The Photoshop version.
+ *
+ * `hostInformation.appVersion` is the documented source, but it is not present on
+ * every host build — reporting the literal string "unknown" in the Studio's header
+ * is worse than reporting what we can actually verify, so fall back to a clearly
+ * labelled UXP build id instead.
+ */
 function hostVersion() {
   try {
     var info = require('uxp').hostInformation;
-    return info ? String(info.appVersion) : 'unknown';
+    if (info && info.appVersion) return String(info.appVersion);
+    if (info && info.appName) return String(info.appName) + ' (version unavailable)';
   } catch (err) {
-    return 'unknown';
+    /* fall through */
   }
+  return 'unknown (UXP ' + uxpVersion() + ')';
+}
+
+function uxpVersion() {
+  try {
+    return String(versions.uxp);
+  } catch (err) {
+    return '?';
+  }
+}
+
+/**
+ * Tells the server the document changed without an operation being responsible.
+ *
+ * Used by the panel's demo-document button: the Studio should refresh its snapshot
+ * when the user changes something in Photoshop by hand, not only when a tool ran.
+ */
+function notifyStateChanged(reason, documentId) {
+  send({
+    v: PROTOCOL_VERSION,
+    type: 'state.changed',
+    reason: reason || 'external',
+    documentId: documentId,
+  });
 }
 
 function isConnected() {
@@ -313,10 +422,22 @@ function getStats() {
   };
 }
 
+/**
+ * The configuration currently in force.
+ *
+ * The panel needs it to grant filesystem access to the right folder, and the
+ * grant is only valid for the exact root the plugin is configured with.
+ */
+function getConfig() {
+  return state.config || { bridgeUrl: 'ws://localhost:3002/bridge', workspaceRoot: '', outputDir: '' };
+}
+
 module.exports = {
+  getConfig: getConfig,
   connect: connect,
   disconnect: disconnect,
   isConnected: isConnected,
+  notifyStateChanged: notifyStateChanged,
   getStats: getStats,
   loadConfig: loadConfig,
   on: function (event, handler) {

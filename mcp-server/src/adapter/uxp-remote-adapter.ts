@@ -8,6 +8,11 @@ import {
   type TextAlign,
   type LayerSelector,
 } from '@photoshop-ai-studio/shared';
+import { copyFile, mkdir, readFile, rename, rm, stat } from 'node:fs/promises';
+import { basename, dirname, join } from 'node:path';
+import { randomBytes } from 'node:crypto';
+
+import { StudioException, type ExportResult, type StagedFile } from '@photoshop-ai-studio/shared';
 import type { PluginBridge } from '../bridge/plugin-bridge.js';
 import { IMAGE_EXTENSIONS, OUTPUT_EXTENSIONS, Workspace } from '../workspace.js';
 
@@ -38,6 +43,87 @@ export class UxpRemoteAdapter implements PhotoshopAdapter {
     return this.bridge.request(op, params);
   }
 
+  /**
+   * Rewrites every `path` in an operation payload to its workspace-relative form.
+   *
+   * The bridge carries relative paths on purpose: the plugin can be on another
+   * operating system, where an absolute path from this process means nothing.
+   */
+  private bridgeParams(params: Record<string, unknown>): Record<string, unknown> {
+    if (typeof params.path === 'string') {
+      return { ...params, path: this.workspace.toBridgePath(params.path) };
+    }
+    return params;
+  }
+
+  /**
+   * Moves a file the plugin staged in its sandbox into the workspace.
+   *
+   * This process, not the plugin, is what has filesystem permissions — see
+   * `ps.stageEntry`. The write goes to a sibling temp name and is renamed into
+   * place, so a reader never observes a half-written export and a failure never
+   * destroys the previous version of a file.
+   */
+  private async publish(
+    staged: StagedFile,
+    destination: string,
+    format: ExportResult['format'],
+    overwritten: boolean,
+  ): Promise<ExportResult> {
+    const source = this.workspace.toLocalPath(staged.nativePath);
+    await mkdir(dirname(destination), { recursive: true });
+
+    const temporary = join(dirname(destination), `.${basename(destination)}.${randomBytes(6).toString('hex')}.part`);
+    try {
+      await copyFile(source, temporary);
+    } catch (cause) {
+      throw new StudioException(
+        'EXPORT_FAILED',
+        `Photoshop produced the file at "${staged.nativePath}" but this process could not read it. ` +
+          'When the server runs in WSL and Photoshop on Windows, the plugin sandbox must live on a drive WSL mounts.',
+        { details: { nativePath: staged.nativePath, localPath: source }, recoverable: false, cause },
+      );
+    }
+
+    let bytes: number;
+    try {
+      bytes = (await stat(temporary)).size;
+      await rm(destination, { force: true });
+      await rename(temporary, destination);
+    } catch (cause) {
+      await rm(temporary, { force: true });
+      throw new StudioException('EXPORT_FAILED', `Could not publish "${basename(destination)}".`, {
+        details: { destination },
+        recoverable: true,
+        cause,
+      });
+    } finally {
+      // The staged copy is transport scratch; leaving it would grow without
+      // bound across a long session.
+      void rm(source, { force: true }).catch(() => undefined);
+    }
+
+    return { path: destination, format, bytes, overwritten };
+  }
+
+  /** Sends a file-producing op and publishes whatever the plugin staged. */
+  private async exportTo(
+    op: 'export_png' | 'export_jpg' | 'save_psd' | 'export_document' | 'save_document',
+    params: Record<string, unknown>,
+    destination: string,
+    format: ExportResult['format'],
+    overwritten: boolean,
+  ): Promise<ExportResult> {
+    const raw = (await this.send(op, params)) as { staged?: StagedFile };
+    if (!raw || !raw.staged) {
+      throw new StudioException('EXPORT_FAILED', `Photoshop did not stage a file for ${op}.`, {
+        details: { op, returned: raw },
+        recoverable: true,
+      });
+    }
+    return this.publish(raw.staged, destination, format, overwritten);
+  }
+
   // --- document ------------------------------------------------------------
 
   async getDocument(): Promise<ResultOf<'get_document'>> {
@@ -57,7 +143,13 @@ export class UxpRemoteAdapter implements PhotoshopAdapter {
       ? this.workspace.resolveOutput(params.path, 'document.psd')
       : undefined;
     if (path) Workspace.assertExtension(path, ['.psd'], 'save_document');
-    return (await this.send('save_document', { ...params, path })) as ResultOf<'save_document'>;
+    return this.exportTo(
+      'save_document',
+      this.bridgeParams({ ...params, path }),
+      path ?? this.workspace.resolveOutput(undefined, 'document.psd'),
+      'psd',
+      params.overwrite === true,
+    );
   }
 
   // --- layers --------------------------------------------------------------
@@ -141,9 +233,20 @@ export class UxpRemoteAdapter implements PhotoshopAdapter {
   // --- images --------------------------------------------------------------
 
   async placeImage(params: ParamsOf<'place_image'>): Promise<ResultOf<'place_image'>> {
-    const path = this.workspace.resolvePath(params.path, { defaultDir: 'assets' });
+    const path = this.workspace.resolveInput(params.path, 'input.png', 'assets');
     Workspace.assertExtension(path, IMAGE_EXTENSIONS, 'place_image');
-    return (await this.send('place_image', { ...params, path })) as ResultOf<'place_image'>;
+    // The bytes travel over the bridge, not just the path.
+    //
+    // The plugin runs inside a UXP sandbox that can only open a file the user
+    // granted it in the panel, and `placeEvent` cannot open a staged sandbox
+    // file at all on Photoshop 26.x — so the image is sent as data and opened
+    // from the plugin's own storage. The path still travels (workspace-relative)
+    // and still goes through the allow-list above, which is what makes the
+    // request auditable and gives the plugin a name for the layer.
+    return (await this.send('place_image', {
+      ...this.bridgeParams({ ...params, path }),
+      data: { fileName: basename(path), base64: (await readFile(path)).toString('base64') },
+    })) as ResultOf<'place_image'>;
   }
 
   async resizeLayer(params: ParamsOf<'resize_layer'>): Promise<ResultOf<'resize_layer'>> {
@@ -166,25 +269,49 @@ export class UxpRemoteAdapter implements PhotoshopAdapter {
     const ext = params.format === 'jpg' ? '.jpg' : params.format === 'psd' ? '.psd' : '.png';
     const path = this.workspace.resolveOutput(params.path, `export${ext}`);
     Workspace.assertExtension(path, OUTPUT_EXTENSIONS, 'export_document');
-    return (await this.send('export_document', { ...params, path })) as ResultOf<'export_document'>;
+    return this.exportTo(
+      'export_document',
+      this.bridgeParams({ ...params, path }),
+      path,
+      ext === '.jpg' ? 'jpg' : ext === '.psd' ? 'psd' : 'png',
+      params.overwrite === true,
+    );
   }
 
   async exportPng(params: ParamsOf<'export_png'>): Promise<ResultOf<'export_png'>> {
     const path = this.workspace.resolveOutput(params.path, 'export.png');
     Workspace.assertExtension(path, ['.png'], 'export_png');
-    return (await this.send('export_png', { ...params, path })) as ResultOf<'export_png'>;
+    return this.exportTo(
+      'export_png',
+      this.bridgeParams({ ...params, path }),
+      path,
+      'png',
+      params.overwrite === true,
+    );
   }
 
   async exportJpg(params: ParamsOf<'export_jpg'>): Promise<ResultOf<'export_jpg'>> {
     const path = this.workspace.resolveOutput(params.path, 'export.jpg');
     Workspace.assertExtension(path, ['.jpg', '.jpeg'], 'export_jpg');
-    return (await this.send('export_jpg', { ...params, path })) as ResultOf<'export_jpg'>;
+    return this.exportTo(
+      'export_jpg',
+      this.bridgeParams({ ...params, path }),
+      path,
+      'jpg',
+      params.overwrite === true,
+    );
   }
 
   async savePsd(params: ParamsOf<'save_psd'>): Promise<ResultOf<'save_psd'>> {
     const path = this.workspace.resolveOutput(params.path, 'document.psd');
     Workspace.assertExtension(path, ['.psd'], 'save_psd');
-    return (await this.send('save_psd', { ...params, path })) as ResultOf<'save_psd'>;
+    return this.exportTo(
+      'save_psd',
+      this.bridgeParams({ ...params, path }),
+      path,
+      'psd',
+      params.overwrite === true,
+    );
   }
 
   // --- preview -------------------------------------------------------------

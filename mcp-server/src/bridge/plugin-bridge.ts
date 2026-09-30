@@ -166,13 +166,24 @@ export class PluginBridge {
       case 'hello': {
         this.hello = message.payload;
         this.connectedAt = new Date().toISOString();
-        this.logger.info(
-          {
-            event: 'photoshop.request',
-            message: `Connected to ${message.payload.hostApp} ${message.payload.hostVersion} (UXP ${message.payload.uxpVersion})`,
-            data: { pluginId: message.payload.pluginId, pluginVersion: message.payload.pluginVersion },
+        this.logger.info({
+          event: 'photoshop.request',
+          message: `Connected to ${message.payload.hostApp} ${message.payload.hostVersion} (UXP ${message.payload.uxpVersion})`,
+          data: {
+            pluginId: message.payload.pluginId,
+            pluginVersion: message.payload.pluginVersion,
+            workspaceRoot: message.payload.config?.workspaceRoot,
+            outputDir: message.payload.config?.outputDir,
+            configError: message.payload.config?.error,
           },
-        );
+        });
+        if (!message.payload.config?.workspaceRoot) {
+          // The single most common cross-OS failure: paths arrive workspace-relative
+          // and the plugin cannot resolve them without a root.
+          this.logger.warn(
+            'the plugin reported no workspaceRoot; every filesystem operation will fail. Set it in photoshop-plugin/config.json',
+          );
+        }
         this.emit('connect', this.getConnection());
         return;
       }

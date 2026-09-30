@@ -46,6 +46,22 @@ export const PluginHelloPayloadSchema = z.object({
   /** Capability set the plugin reports; lets the server fail fast on old plugins. */
   protocolVersion: z.number().int(),
   supports: z.array(z.enum(OPERATION_NAMES)).optional(),
+  /**
+   * The plugin's own view of its configuration.
+   *
+   * Not used for control flow — the server logs it, which turns a
+   * workspace-root mismatch between two operating systems into a one-line
+   * diagnosis instead of a confusing "no workspaceRoot configured" on the
+   * first export.
+   */
+  config: z
+    .object({
+      workspaceRoot: z.string().nullable(),
+      outputDir: z.string().nullable(),
+      /** Why the config could not be read, when that happened. */
+      error: z.string().nullable().optional(),
+    })
+    .optional(),
 });
 
 export type PluginHelloPayload = z.infer<typeof PluginHelloPayloadSchema>;

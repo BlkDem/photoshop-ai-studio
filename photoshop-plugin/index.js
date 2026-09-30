@@ -14,13 +14,32 @@ var Logger = require('./lib/logger.js').Logger;
 
 var ui = null;
 
+// Startup diagnostics, emitted once the socket is actually open.
+bridge.on('connect', function (connection) {
+  Logger.info('plugin connected', {
+    pluginId: connection.pluginId,
+    pluginVersion: connection.pluginVersion,
+    hostApp: connection.hostApp,
+    hostVersion: connection.hostVersion,
+    uxpVersion: connection.uxpVersion,
+  });
+  // Dump the host's LayerKind mapping: it is the ground truth for the taxonomy in
+  // lib/ps.js, and having it in the MCP server's log makes a future mismatch a
+  // lookup rather than a guess.
+  require('./lib/ps.js').logLayerKindEnum();
+});
+
 entrypoints.setup({
   plugin: {
     create: function () {
       Logger.setLevel('info');
-      Logger.info('Photoshop AI Studio plugin created');
       // Connect eagerly: the panel may never be opened, and the AI should still
       // be able to reach a document the user already has open.
+      //
+      // Nothing else may be logged here. `send()` silently drops a frame while
+      // the socket is closed, so anything logged before `connect()` resolves
+      // never reaches the MCP server — which is exactly why the startup
+      // diagnostics below hang off the `connect` event instead.
       bridge.connect();
     },
     destroy: function () {
@@ -86,6 +105,10 @@ function createUi() {
       toggle: ref('toggle'),
       ping: ref('ping'),
       save: ref('save-config'),
+      devTools: ref('dev-tools'),
+      demoDoc: ref('demo-doc'),
+      grant: ref('grant-access'),
+      grantStatus: ref('grant-status'),
     };
     if (!refs.toggle) return;
 
@@ -109,6 +132,88 @@ function createUi() {
       persistConfig();
       render(bridge.getStats());
     });
+
+    if (refs.grant) {
+      bind(refs.grant, 'click', function () {
+        grantWorkspaceAccess();
+      });
+    }
+
+    if (refs.demoDoc) {
+      bind(refs.demoDoc, 'click', function () {
+        createDemoDocument();
+      });
+    }
+  }
+
+  /**
+   * Asks the user to grant this plugin access to the configured workspace.
+   *
+   * UXP gives a plugin filesystem access to exactly one folder the user picks,
+   * for the session, and no amount of configuration can widen that. It has to
+   * happen from a gesture, so it is a button rather than something the AI can
+   * trigger — the plan is unchanged by granting access.
+   */
+  function grantWorkspaceAccess() {
+    var ps = require('./lib/ps.js');
+    if (refs.grant) refs.grant.disabled = true;
+    if (refs.error) refs.error.hidden = true;
+
+    ps.requestWorkspaceGrant(bridge.getConfig())
+      .then(function (folder) {
+        if (refs.grantStatus) {
+          refs.grantStatus.hidden = false;
+          refs.grantStatus.textContent = 'Granted: ' + folder.nativePath;
+        }
+        Logger.info('workspace access granted: ' + folder.nativePath);
+      })
+      .catch(function (err) {
+        if (refs.grantStatus) {
+          refs.grantStatus.hidden = false;
+          refs.grantStatus.textContent = ((err && err.message) || String(err));
+        }
+        Logger.error('workspace access not granted: ' + ((err && err.message) || String(err)));
+      })
+      .then(function () {
+        if (refs.grant) refs.grant.disabled = false;
+      });
+  }
+
+  /**
+   * Creates the demo document inside Photoshop's modal scope.
+   *
+   * This is a panel affordance, not an MCP tool: the AI has no `create_document`
+   * capability, and giving it one purely so a demo can bootstrap itself would be
+   * widening the product for testing convenience.
+   */
+  function createDemoDocument() {
+    var demo = require('./lib/demo.js');
+    var photoshop = require('photoshop');
+
+    if (refs.demoDoc) refs.demoDoc.disabled = true;
+    if (refs.error) refs.error.hidden = true;
+
+    photoshop.core
+      .executeAsModal(
+        function () {
+          return demo.createDemoDocument();
+        },
+        { commandName: 'AI Studio: demo document', interactive: false },
+      )
+      .then(function (result) {
+        Logger.info('demo document ready: ' + result.name);
+        render(bridge.getStats());
+      })
+      .catch(function (err) {
+        Logger.error('demo document failed: ' + ((err && err.message) || String(err)));
+        if (refs.error) {
+          refs.error.hidden = false;
+          refs.error.textContent = 'Could not create the demo document: ' + ((err && err.message) || String(err));
+        }
+      })
+      .then(function () {
+        if (refs.demoDoc) refs.demoDoc.disabled = false;
+      });
   }
 
   function detach() {
@@ -161,6 +266,10 @@ function createUi() {
     if (refs.active) refs.active.textContent = stats.active || '—';
     if (refs.latency) refs.latency.textContent = stats.stats.lastLatencyMs ? stats.stats.lastLatencyMs + ' ms' : '—';
     if (refs.ops) refs.ops.textContent = String(stats.stats.ops);
+    if (refs.devTools) {
+      // Opt-in: a shipped plugin should not offer this.
+      refs.devTools.hidden = !(stats.config && stats.config.devTools);
+    }
     if (refs.toggle) refs.toggle.textContent = stats.connected ? 'Disconnect' : 'Connect';
     if (refs.ping) refs.ping.disabled = !stats.connected;
     if (refs.save) refs.save.disabled = !stats.config;

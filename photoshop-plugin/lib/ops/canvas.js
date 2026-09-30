@@ -31,8 +31,12 @@ function getDocumentInfo(ctx) {
 function duplicateDocument(ctx) {
   var doc = ps.resolveDocument(ctx.params.documentId);
   var name = ctx.params.name;
-  var duplicate = name ? doc.duplicate(name) : doc.duplicate();
-  return { id: String(duplicate.id), name: duplicate.name };
+  // `Document.duplicate()` resolves to the new Document; reading `.name` off the
+  // promise yields undefined, which failed the tool's own result schema and made
+  // every square-version plan die on its first step.
+  return (name ? doc.duplicate(name) : doc.duplicate()).then(function (duplicate) {
+    return { id: String(duplicate.id), name: String(duplicate.name) };
+  });
 }
 
 /** `resize_canvas` — changes the canvas without scaling pixel content. */
@@ -49,7 +53,11 @@ function resizeCanvas(ctx) {
         _target: [{ _ref: 'document', _enum: 'ordinal', _value: 'targetEnum' }],
         width: { _unit: 'pixelsUnit', _value: width },
         height: { _unit: 'pixelsUnit', _value: height },
-        relative: { _enum: 'anchorPoint', _value: anchor },
+        // Canvas Size takes a horizontal/vertical pair, not a single `anchorPoint`.
+        // Passing the wrong enum does not raise an error — Photoshop reports
+        // "the user cancelled the operation" (-128), which is how this was found.
+        horizontal: { _enum: 'horizontalLocation', _value: horizontalFor(anchor) },
+        vertical: { _enum: 'verticalLocation', _value: verticalFor(anchor) },
         _options: { dialogOptions: 'dontDisplay' },
       },
     ])
@@ -58,11 +66,34 @@ function resizeCanvas(ctx) {
     });
 }
 
+/** `topLeft` → keep the left edge; `topRight` → keep the right edge; centre → `center`. */
+function horizontalFor(anchor) {
+  if (/Left$/.test(anchor)) return 'left';
+  if (/Right$/.test(anchor)) return 'right';
+  return 'center';
+}
+
+/** `topLeft` → keep the top edge; `bottomLeft` → keep the bottom edge. */
+function verticalFor(anchor) {
+  if (/^top/.test(anchor)) return 'top';
+  if (/^bottom/.test(anchor)) return 'bottom';
+  return 'center';
+}
+
 /**
- * `crop_document` — the rect is absolute document pixels.
+ * `crop_document` — discards everything outside the given rectangle.
  *
- * `crop` keeps the region *outside* the given bounds, so the descriptor asks
- * Photoshop to crop to the complement by listing the four outside edges.
+ * There is no working implementation of this on Photoshop 26.11 / UXP 9.0.2.
+ * Every form of the `crop` descriptor was tried — `ordinal/targetEnum` and
+ * `_id`, with and without `_options`, with and without pixel units — and each
+ * was refused with a modal program error, or left the bridge waiting until the
+ * watchdog fired. ExtendScript performs the same crop happily through COM, so
+ * this is a UXP gap rather than a document problem.
+ *
+ * Saying so is better than letting Photoshop answer "The user cancelled the
+ * operation", which sends the planner off to repair a cancellation that nobody
+ * performed. `resize_canvas` covers the common intent — changing the canvas
+ * while keeping content — and works.
  */
 function cropDocument(ctx) {
   var doc = ps.resolveDocument(ctx.params.documentId);
@@ -77,27 +108,24 @@ function cropDocument(ctx) {
       'Crop rect (' + x + ',' + y + ',' + w + '×' + h + ') does not fit the ' + doc.width + '×' + doc.height + ' canvas.',
     );
   }
-
-  var descriptor = {
-    _obj: 'crop',
-    _target: [{ _ref: 'document', _enum: 'ordinal', _value: 'targetEnum' }],
-    _options: { dialogOptions: 'dontDisplay' },
-  };
-  if (x > 0) descriptor.left = { _unit: 'pixelsUnit', _value: x };
-  if (y > 0) descriptor.top = { _unit: 'pixelsUnit', _value: y };
-  if (x + w < doc.width) descriptor.right = { _unit: 'pixelsUnit', _value: doc.width - (x + w) };
-  if (y + h < doc.height) descriptor.bottom = { _unit: 'pixelsUnit', _value: doc.height - (y + h) };
-
-  if (!descriptor.left && !descriptor.top && !descriptor.right && !descriptor.bottom) {
+  if (x === 0 && y === 0 && w === doc.width && h === doc.height) {
     throw StudioError('INVALID_PARAMS', 'The crop rectangle covers the whole canvas; nothing to do.');
   }
 
-  return ps.batchPlay([descriptor]).then(function () {
-    return ps.documentInfo(doc);
-  });
+  throw StudioError(
+    'UNSUPPORTED_OPERATION',
+    'This Photoshop build refuses every form of the crop command, so pixels cannot be discarded. ' +
+      'Use resize_canvas to change the canvas while keeping content.',
+    { recoverable: false, details: { document: doc.name, crop: { x: x, y: y, width: w, height: h } } },
+  );
 }
 
+
+
 module.exports = {
+  __test_anchor: function (anchor) {
+    return { horizontal: horizontalFor(anchor), vertical: verticalFor(anchor) };
+  },
   get_document: getDocument,
   get_document_info: getDocumentInfo,
   duplicate_document: duplicateDocument,
