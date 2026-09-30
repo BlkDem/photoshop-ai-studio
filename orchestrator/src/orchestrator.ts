@@ -763,30 +763,44 @@ export class Orchestrator {
     const verification = context.verification;
     const succeeded = context.verification?.passed ?? false;
     const stepFailures = run.executedSteps.filter((s) => s.status === 'failed');
+    // Execution stops at the first failure, so a failed step means everything
+    // after it in the plan never ran.
+    const neverExecuted = Math.max(0, (run.plan?.steps.length ?? 0) - run.executedSteps.length);
 
     if (context.aborted) {
       run.status = 'cancelled';
       run.error = { code: 'CANCELLED', message: 'Cancelled by the user', recoverable: true };
     } else if (succeeded && stepFailures.length === 0) {
       run.status = 'succeeded';
-    } else if (succeeded) {
-      // Verification passed but a step was skipped or repaired — be explicit.
-      run.status = context.repairAttempts > 0 || stepFailures.length > 0 ? 'succeeded' : 'succeeded';
-      if (stepFailures.length > 0) {
-        this.logger.warn({
-          event: 'run.end',
-          runId: run.id,
-          message: 'verification passed after a failed/repaired step',
-          data: { failed: stepFailures.map((s) => s.stepId) },
-        });
-      }
     } else {
-      run.status = errors.length > 0 || stepFailures.length > 0 ? 'failed' : 'failed';
-      run.error = errors[0] ?? stepFailures[0]?.error ?? {
+      run.status = 'failed';
+      const reason = errors[0] ?? stepFailures[0]?.error;
+      run.error = reason ?? {
         code: 'VERIFICATION_FAILED',
         message: verification?.repairHint ?? 'Verification failed',
         recoverable: true,
       };
+
+      if (neverExecuted > 0) {
+        run.error = {
+          ...run.error,
+          message: `${run.error.message} (${neverExecuted} step(s) never executed)`,
+        };
+      }
+
+      if (succeeded && stepFailures.length > 0) {
+        // Verification passed, but over the steps that did run. Those checks
+        // describe a subset of the request, so this is not success — and saying
+        // it is is how the tool teaches people to trust a green light that means
+        // nothing. A repair that did fix the goal leaves its steps appended to
+        // `executedSteps`, so the original failure stays visible here too.
+        this.logger.warn({
+          event: 'run.end',
+          runId: run.id,
+          message: 'verification passed after a failed step; reporting failure',
+          data: { failed: stepFailures.map((s) => s.stepId), neverExecuted },
+        });
+      }
     }
 
     this.finish(context, startedMs);

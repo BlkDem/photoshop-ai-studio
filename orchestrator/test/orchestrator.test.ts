@@ -189,6 +189,29 @@ describe('complex request', () => {
     expect(executed.some((step) => step.tool === 'photoshop.export_png')).toBe(true);
   });
 
+  it('does not report success when a step failed even though verification passed', async () => {
+    // Regression: on a real Photoshop run, `duplicate_document` returned a
+    // promise instead of a document, so step 1 failed. Verification then passed
+    // over the handful of steps that did run, and the run was reported as
+    // `succeeded` — with the other twelve steps silently never executed.
+    const orchestrator = makeOrchestrator({ maxRepairAttempts: 0 });
+    const original = adapter.duplicateDocument.bind(adapter);
+    (adapter as unknown as { duplicateDocument: unknown }).duplicateDocument = () => {
+      throw new Error('simulated step failure');
+    };
+
+    try {
+      const detail = await run(orchestrator, 'Create a square version of this banner.');
+      expect(detail.run.executedSteps.some((s) => s.status === 'failed')).toBe(true);
+      // The never-executed steps must be visible in the error, not just implied
+      // by a status that says everything was fine.
+      expect(detail.run.status).not.toBe('succeeded');
+      expect(detail.run.error?.message).toMatch(/never executed/);
+    } finally {
+      (adapter as unknown as { duplicateDocument: unknown }).duplicateDocument = original;
+    }
+  });
+
   it('groups layers and verifies the new hierarchy', async () => {
     const orchestrator = makeOrchestrator();
     const detail = await run(orchestrator, 'Group the Logo and the Title into a Header');
