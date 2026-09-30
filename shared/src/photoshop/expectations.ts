@@ -59,6 +59,135 @@ export function deriveExpectations<K extends PhotoshopOpName>(
     case 'delete_layer':
       return [{ kind: 'layer_absent', layer: sel(p) }];
 
+    // --- layer properties --------------------------------------------------
+    // These have no mechanical post-condition, which until recently meant a tool
+    // that did nothing at all would still verify clean: 23 of 47 operations were
+    // in that position. A mutating tool with no expectation is worse than no tool,
+    // because the run reports that it was checked.
+
+    case 'set_layer_blend_mode':
+      return [{ kind: 'layer_property', layer: sel(p), property: 'blendMode', equals: String(p.mode), tolerance: 0 }];
+
+    case 'set_layer_fill_opacity':
+      return [{ kind: 'layer_property', layer: sel(p), property: 'fillOpacity', equals: Number(p.opacity), tolerance: 0.6 }];
+
+    case 'rasterize_layer':
+      // The point of rasterizing is that the layer stops being live.
+      return [{ kind: 'layer_property', layer: sel(p), property: 'type', equals: 'pixel', tolerance: 0 }];
+
+    // --- text --------------------------------------------------------------
+    case 'set_text_style': {
+      const out: Expectation[] = [];
+      const text = typeof p.fontSize === 'number' ? { fontSize: Number(p.fontSize) } : undefined;
+      void text;
+      if (typeof p.tracking === 'number') {
+        out.push({ kind: 'text_property', layer: sel(p), property: 'tracking', equals: p.tracking, tolerance: 0.5 });
+      }
+      if (typeof p.horizontalScale === 'number') {
+        out.push({
+          kind: 'text_property',
+          layer: sel(p),
+          property: 'horizontalScale',
+          equals: p.horizontalScale,
+          tolerance: 0.5,
+        });
+      }
+      if (typeof p.fauxBold === 'boolean') {
+        out.push({ kind: 'text_property', layer: sel(p), property: 'fauxBold', equals: p.fauxBold, tolerance: 0 });
+      }
+      if (typeof p.fauxItalic === 'boolean') {
+        out.push({ kind: 'text_property', layer: sel(p), property: 'fauxItalic', equals: p.fauxItalic, tolerance: 0 });
+      }
+      if (typeof p.paragraphWidth === 'number') {
+        out.push({ kind: 'text_property', layer: sel(p), property: 'width', equals: p.paragraphWidth, tolerance: 3 });
+      }
+      return out;
+    }
+
+    // --- document ----------------------------------------------------------
+    /*
+     * Three mutating tools deliberately get no derived post-condition, because any
+     * expected value would be a guess rather than a fact:
+     *   - `trim_document` — the canvas ends up as small as the artwork allows;
+     *   - `merge_visible_layers` — the layer count drops by an unknown amount,
+     *     since it depends on how the visible layers are grouped;
+     *   - `close_document` — the check would be that the document is *gone*, and
+     *     no `document_property` can express absence.
+     * All three report their own result, all three show up in the diff, and all
+     * three are gated on confirmation. Deriving a check here would be theatre.
+     */
+
+    case 'create_document': {
+      const out: Expectation[] = [];
+      if (typeof p.width === 'number') {
+        out.push({ kind: 'document_property', property: 'width', equals: p.width, tolerance: 0.5 });
+      }
+      if (typeof p.height === 'number') {
+        out.push({ kind: 'document_property', property: 'height', equals: p.height, tolerance: 0.5 });
+      }
+      return out;
+    }
+
+    case 'set_selection': {
+      // The selection's real extent depends on the artwork (a marquee clipped to
+      // the canvas, a select-all over existing content), so the check is on the
+      // requested size against what came back, not on a fixed number.
+      const out: Expectation[] = [];
+      if (typeof p.width === 'number') {
+        out.push({ kind: 'document_property', property: 'selectionWidth', equals: p.width, tolerance: 1 });
+      }
+      if (typeof p.height === 'number') {
+        out.push({ kind: 'document_property', property: 'selectionHeight', equals: p.height, tolerance: 1 });
+      }
+      return out;
+    }
+
+    case 'flatten_document':
+      return [{ kind: 'layer_count', equals: 1 }];
+
+    // --- files -------------------------------------------------------------
+    // Writing a file cannot be checked by looking at the document, and these
+    // tools were completely unverified: an export that silently wrote nothing,
+    // or wrote to the wrong place, reported a clean step.
+
+    case 'export_png':
+    case 'export_jpg':
+    case 'export_document':
+    case 'save_document':
+    case 'save_psd':
+      return typeof p.path === 'string' ? [{ kind: 'file_exists', path: p.path }] : [];
+
+    case 'duplicate_document':
+      // Only checkable when the caller named the copy; otherwise Photoshop appends
+      // its own " copy" suffix and any expected name would be a guess.
+      return typeof p.name === 'string'
+        ? [{ kind: 'document_property', property: 'name', equals: p.name, tolerance: 0 }]
+        : [];
+
+    case 'move_layer_to_group': {
+      // The group is named rather than addressed by id, because that is the only
+      // thing a snapshot can confirm a layer ended up inside.
+      const group = sel(p.group);
+      if (typeof group.layerName !== 'string') return [];
+      return [{ kind: 'layer_parent_named', layer: sel(p.layer), groupName: group.layerName }];
+    }
+
+    case 'convert_color_mode':
+      return [{ kind: 'document_property', property: 'colorMode', equals: String(p.mode), tolerance: 0 }];
+
+    // --- pixels ------------------------------------------------------------
+    // A filter or a transform changes pixels and bounds, never a named value the
+    // snapshot carries. What *is* checkable is that the layer survived and is
+    // still on the canvas, which catches the two ways these fail: the layer went
+    // missing, or the operation moved it out of the document.
+    case 'apply_filter':
+    case 'flip_layer':
+    case 'rotate_layer':
+      return [
+        { kind: 'layer_exists', layer: sel(p), where: 'document' },
+        { kind: 'layer_property', layer: sel(p), property: 'withinCanvas', equals: true, tolerance: 0 },
+      ];
+
     case 'create_layer':
       return [
         { kind: 'layer_exists', layer: { layerName: String(p.name) }, where: 'document' },

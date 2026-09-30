@@ -14,6 +14,9 @@ function getDocument(ctx) {
   var doc = ps.resolveDocument(ctx.params.documentId);
   var info = ps.documentInfo(doc);
   info.layers = ps.flattenLayers(doc.layers);
+  // The snapshot carries the selection so a plan can see what it is acting on and
+  // `set_selection` has a mechanical post-condition.
+  info.selection = ps.documentSelection(doc);
   return info;
 }
 

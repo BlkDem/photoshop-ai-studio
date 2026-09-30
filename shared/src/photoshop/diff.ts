@@ -233,13 +233,25 @@ export const ExpectationSchema = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('layer_property'),
     layer: LayerSelectorSchema,
-    property: z.enum(['name', 'visible', 'opacity', 'x', 'y', 'width', 'height', 'parentId', 'type', 'blendMode', 'isLocked']),
+    property: z.enum([
+      'name', 'visible', 'opacity', 'x', 'y', 'width', 'height', 'parentId', 'type', 'blendMode', 'isLocked',
+      // Added with the DOM-backed tools, so a tool that quietly did nothing
+      // cannot pass verification. `fillOpacity` is distinct from `opacity`, and
+      // `withinCanvas` catches a transform that threw the layer out of the frame.
+      'fillOpacity',
+      'withinCanvas',
+    ]),
     equals: z.union([z.string(), z.number(), z.boolean(), z.null()]),
     tolerance: z.number().nonnegative().default(0),
   }),
   z.object({
     kind: z.literal('document_property'),
-    property: z.enum(['name', 'width', 'height', 'resolution', 'colorMode', 'layerCount', 'path', 'saved']),
+    property: z.enum([
+      'name', 'width', 'height', 'resolution', 'colorMode', 'layerCount', 'path', 'saved',
+      // Derived from the selection in the snapshot, so `set_selection` has
+      // something mechanical to be checked against.
+      'selectionWidth', 'selectionHeight',
+    ]),
     equals: z.union([z.string(), z.number(), z.boolean(), z.null()]),
     tolerance: z.number().nonnegative().default(0),
   }),
@@ -254,8 +266,15 @@ export const ExpectationSchema = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('text_property'),
     layer: LayerSelectorSchema,
-    property: z.enum(['text', 'font', 'fontSize', 'color']),
-    equals: z.union([z.string(), z.number(), z.record(z.string(), z.unknown())]),
+    property: z.enum([
+      'text', 'font', 'fontSize', 'color',
+      // The style patch writes these; without them a `set_text_style` step was
+      // verified against nothing at all.
+      'tracking', 'horizontalScale', 'verticalScale', 'fauxBold', 'fauxItalic', 'underline', 'strikeThrough', 'leading',
+      // The text box width, which is what `paragraphWidth` produces.
+      'width',
+    ]),
+    equals: z.union([z.string(), z.number(), z.boolean(), z.record(z.string(), z.unknown())]),
     tolerance: z.number().nonnegative().default(0),
   }),
   z.object({

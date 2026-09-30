@@ -33,6 +33,8 @@ adapter touches Photoshop; only the plugin knows Adobe exists.
 9. [ADR-008 — The model cannot mark a step safe](#adr-008--the-model-cannot-mark-a-step-safe)
 10. [ADR-009 — JEV abstains rather than guesses](#adr-009--jev-abstains-rather-than-guesses)
 11. [ADR-010 — A mock adapter, not a mock Photoshop](#adr-010--a-mock-adapter-not-a-mock-photoshop)
+12. [ADR-011 — Writing a value is not the same as applying it](#adr-011--writing-a-value-is-not-the-same-as-applying-it)
+13. [ADR-012 — The servers must be restarted, or the evidence lies](#adr-012--the-servers-must-be-restarted-or-the-evidence-lies)
 12. [Tool surface: why there is no `execute_anything`](#tool-surface-why-there-is-no-execute_anything)
 13. [End-to-end walkthrough](#end-to-end-walkthrough)
 14. [Security model](#security-model)
@@ -217,13 +219,39 @@ each tool from its arguments alone:
 |---|---|
 | `rename_layer` | that layer's `name` equals the new name |
 | `set_layer_opacity` | that layer's `opacity` ≈ the requested value (±0.5) |
+| `set_layer_blend_mode` | that layer's `blendMode` is the requested mode |
+| `set_layer_fill_opacity` | that layer's `fillOpacity` ≈ the requested value |
 | `move_layer` | `x` / `y` match, ±1 px for rounding |
 | `delete_layer` | the layer is absent |
 | `resize_canvas` | `document.width` / `document.height` match |
+| `create_document` | the new document's `width` / `height` match |
+| `set_selection` | the reported selection is the requested size |
 | `move_layer_to_group` | the layer's `parentId` is the group, or its parent is named as given |
 | `export_*` | the file exists |
+| `save_psd` / `save_document` | the file exists |
 | `create_text_layer` | the text content reads back |
+| `set_text_style` | each requested style value reads back: `tracking`, `fauxBold`, `fauxItalic`, the wrap width |
+| `apply_filter` / `flip_layer` / `rotate_layer` | the layer survived and still overlaps the canvas |
+| `rasterize_layer` | the layer is now a pixel layer |
+| `flatten_document` | one layer remains |
+| `convert_color_mode` | the document's `colorMode` is the requested mode |
+| `duplicate_document` | the copy carries the requested name |
 | read-only tools | nothing — there is nothing to verify |
+
+A mutating tool with **no** expectation is worse than no tool at all, because the
+run reports that the step was verified when nothing was checked. Twenty-three of
+the forty-seven operations were in that position at one point — a blend-mode step
+that did nothing verified clean. `orchestrator/test/orchestrator.test.ts` now
+fails if a tool is added to the registry and not accounted for in one of the three
+groups above: sampled with real arguments, read-only, or explicitly listed as
+not derivable with a written reason.
+
+Only three mutating tools are genuinely not derivable, and each says why in
+`expectations.ts`: `trim_document` (the canvas ends up as small as the artwork
+allows), `merge_visible_layers` (the layer count drops by an unknown amount), and
+`close_document` (the check would be that the document is *gone*, which no
+property can express). All three report their own result, appear in the diff, and
+are gated on confirmation.
 
 The planner may add its own `expect` entries; those are merged on top and
 de-duplicated by key. It cannot remove a derived one. A model that forgets to
@@ -284,7 +312,61 @@ against:
 
 ---
 
-## Tool surface: why there is no `execute_anything`
+## ADR-011 — Writing a value is not the same as applying it
+
+The UXP DOM accepts assignments it does not intend to honour. `style.strikeThrough
+= 'strikethroughOn'` returns without throwing and leaves the text unchanged;
+`layer.translate()` behaved the same way in an earlier revision and made a
+`move_layer` step report success for a layer that had not moved a pixel.
+
+So an operation that patches state reads the values back and reports two lists
+rather than one:
+
+```
+applied:  ["tracking", "fauxBold", "paragraphWidth"]
+ignored:  ["strikethrough"]
+```
+
+`ignored` is the whole point. A caller — a planner, a person reading the run —
+needs to know that a request was dropped, and a single `applied` list cannot say
+so. This is also what makes the derived expectation for `set_text_style` worth
+having: `strikeThrough` is now readable, so "I asked for strikethrough and it is
+still off" is a fact rather than an absence of evidence.
+
+The same reasoning produced the `withinCanvas` field on a layer snapshot, and
+`text.strikethrough_enum` in the capability report: on this build
+`Constants.StrikeThrough` exists but is not usable, and the report says exactly
+that instead of implying the feature is there.
+
+Related, and easy to get wrong: `Constants.Underline` and
+`Constants.StrikeThrough` are **different enums and are not interchangeable**.
+Writing an underline value into the strikethrough field is how a strikethrough
+request was once turned into nonsense. The "on" value is derived from what
+Photoshop currently reports (`strikethroughOff` → `strikethroughOn`) so a build
+that spells it differently still works.
+
+---
+
+## ADR-012 — The servers must be restarted, or the evidence lies
+
+A running server keeps the `dist/` it loaded at start-up for its whole lifetime.
+Rebuilding without restarting produces a failure that points at the wrong thing
+entirely: the plugin reports a new field, a result schema that predates the field
+strips it, and a check written against that field fails for a reason that no
+longer exists anywhere in the source.
+
+`scripts/dev-up.ps1` therefore builds before it starts anything, and refuses to
+start the servers at all if that build fails. Rebuilding by hand and re-probing
+without a restart is how an hour went into proving a field was missing from a
+response that the process had never been able to send.
+
+Note also that the machine-wide `node` on PATH is older than the toolchain
+(`vitest` imports `node:util`'s `styleText`, Node 22+), so a build run outside
+`dev-up`/`win-env` fails in the studio bundle while the TypeScript half appears to
+succeed. Pin the local Node 22 first.
+
+---
+
 
 An open escape hatch — a tool that runs arbitrary ActionDescriptors, or arbitrary
 JavaScript — would let a model bypass schema validation, the workspace allowlist

@@ -90,6 +90,7 @@ var NOT_ON_DOM = {
   'adjustment.layer': 'Not on the DOM; an adjustment layer needs a `makeAdjustmentLayer` descriptor.',
   'text.leading': 'Not exposed on the DOM, though `paragraphStyle.leading` may be.',
   'text.underline': 'Constants.Underline has no plain "on" here, only the vertical-text variants.',
+  'text.strikethrough': 'characterStyle.strikeThrough takes a Constants.StrikeThrough enum, separate from Underline; the two are not interchangeable.',
 };
 
 /**
@@ -226,6 +227,7 @@ function readApiSurface() {
     'text.faux_italic': probe(layer, 'textItem.characterStyle.fauxItalic'),
     'text.baseline_shift': probe(layer, 'textItem.characterStyle.baselineShift'),
     'text.underline_enum': probe(constants, 'Underline'),
+    'text.strikethrough_enum': probe(constants, 'StrikeThrough'),
     'selection_type_enum': probe(constants, 'SelectionType'),
     'text.paragraph_width': probe(layer, 'textItem.convertToParagraphText'),
 

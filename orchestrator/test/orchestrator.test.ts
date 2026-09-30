@@ -7,6 +7,8 @@ import { join } from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import type { RunDetail } from '@photoshop-ai-studio/shared';
+import { TOOL_META, deriveExpectations } from '@photoshop-ai-studio/shared';
+
 import { LogBus, createLogger } from '@photoshop-ai-studio/shared/node';
 import { MockPhotoshopAdapter } from '@photoshop-ai-studio/mcp-server/adapter/mock-adapter';
 import { createHttpApp } from '@photoshop-ai-studio/mcp-server/http';
@@ -445,5 +447,117 @@ describe('state', () => {
     expect(snapshot).toBeNull();
     expect(connection.connected).toBe(false);
     expect(connection.lastError).toBeTruthy();
+  });
+});
+
+/**
+ * Mutating tools whose outcome genuinely cannot be derived from their arguments.
+ * Each carries a written reason in `expectations.ts`; listing them here means
+ * adding a tool to this set is a conscious decision to give up a check.
+ */
+const NOT_DERIVABLE: Record<string, string> = {
+  trim_document: 'the canvas ends up as small as the artwork allows',
+  merge_visible_layers: 'the layer count drops by an unknown amount, depending on grouping',
+  close_document: 'the check would be that the document is gone, which no property can express',
+};
+
+/** Read-only tools: there is no post-condition because nothing changed. */
+const READ_ONLY = new Set([
+  'get_document', 'get_document_info', 'get_layers', 'get_layer', 'get_text_layer', 'get_documents',
+  'get_capabilities', 'render_preview', 'sample_color',
+]);
+
+describe('every mutating tool has a mechanical post-condition', () => {
+  /**
+   * A mutating tool with no expectation is worse than no tool at all: the run
+   * reports that the step was verified when nothing was checked. Twenty-three of
+   * the forty-seven operations were in that position, so the derived expectations
+   * are guarded here against quietly losing another one.
+   */
+  const SAMPLES: Record<string, unknown> = {
+    set_layer_blend_mode: { layerName: 'Logo', mode: 'multiply' },
+    set_layer_fill_opacity: { layerName: 'Logo', opacity: 45 },
+    rasterize_layer: { layerName: 'Logo' },
+    set_text_style: { layerName: 'Headline', tracking: 50, fauxBold: true, paragraphWidth: 400 },
+    create_document: { width: 1200, height: 800 },
+    set_selection: { x: 0, y: 0, width: 100, height: 100 },
+    flatten_document: {},
+    convert_color_mode: { mode: 'grayscale' },
+    apply_filter: { layerName: 'Logo', filter: 'gaussianBlur', radius: 4 },
+    flip_layer: { layerName: 'Logo', axis: 'horizontal' },
+    rotate_layer: { layerName: 'Logo', angle: 90 },
+    export_png: { path: '/tmp/out.png' },
+    export_jpg: { path: '/tmp/out.jpg' },
+    export_document: { path: '/tmp/out.webp' },
+    save_document: { path: '/tmp/out.psd' },
+    save_psd: { path: '/tmp/out.psd' },
+    duplicate_document: { name: 'Logo copy' },
+    move_layer_to_group: { layer: { layerName: 'Logo' }, group: { layerName: 'Group' } },
+    move_layer: { layerName: 'Logo', x: 10, y: 20 },
+    update_text_layer: { layerName: 'Headline', text: 'Hi' },
+    // The tools that already had checks, kept in the table so the count stays honest.
+    create_layer: { name: 'Logo' },
+    delete_layer: { layerName: 'Logo' },
+    rename_layer: { layerName: 'Logo', name: 'Mark' },
+    set_layer_visibility: { layerName: 'Logo', visible: false },
+    set_layer_opacity: { layerName: 'Logo', opacity: 50 },
+    create_group: { name: 'Group' },
+    reorder_layer: { layerName: 'Logo', toIndex: 0 },
+    create_text_layer: { name: 'Headline', text: 'Hi' },
+    set_text_position: { layerName: 'Headline', x: 10, y: 20 },
+    set_text_font_size: { layerName: 'Headline', size: 48 },
+    set_text_color: { layerName: 'Headline', color: { r: 255, g: 0, b: 0 } },
+    place_image: { path: '/tmp/logo.png' },
+    resize_layer: { layerName: 'Logo', width: 200 },
+    resize_canvas: { width: 800, height: 600 },
+    crop_document: { left: 0, top: 0, right: 400, bottom: 300 },
+  };
+
+  it('derives something checkable for each of them', () => {
+    const unverified = [...Object.keys(SAMPLES)].filter(
+      (op) => deriveExpectations(op as never, SAMPLES[op] as never).length === 0,
+    );
+    expect(unverified).toEqual([]);
+  });
+
+  it('leaves nothing unexplained', () => {
+    // Guards the other direction: a tool dropped into the registry that is neither
+    // read-only, nor sampled above, nor justified here, would vanish from testing.
+    const accounted = new Set([...Object.keys(SAMPLES), ...READ_ONLY, ...Object.keys(NOT_DERIVABLE)]);
+    const missing = TOOL_META.map((t) => t.op).filter((op) => !accounted.has(op));
+    expect(missing).toEqual([]);
+  });
+
+  it('checks the value a blend-mode or fill-opacity step was asked for', () => {
+    expect(deriveExpectations('set_layer_blend_mode', { layerName: 'Logo', mode: 'multiply' } as never)).toEqual([
+      { kind: 'layer_property', layer: { layerName: 'Logo' }, property: 'blendMode', equals: 'multiply', tolerance: 0 },
+    ]);
+    expect(deriveExpectations('set_layer_fill_opacity', { layerName: 'Logo', opacity: 45 } as never)).toEqual([
+      { kind: 'layer_property', layer: { layerName: 'Logo' }, property: 'fillOpacity', equals: 45, tolerance: 0.6 },
+    ]);
+  });
+
+  it('checks that an export actually wrote the file it was asked for', () => {
+    // An export that wrote nothing, or wrote to the wrong path, otherwise verified clean.
+    expect(deriveExpectations('export_png', { path: '/tmp/out.png' } as never)).toEqual([
+      { kind: 'file_exists', path: '/tmp/out.png' },
+    ]);
+  });
+
+  it('checks that a filter or transform left the layer on the canvas', () => {
+    // Content pushed out of the frame is otherwise indistinguishable from an edit.
+    const expectations = deriveExpectations('apply_filter', {
+      layerName: 'Logo',
+      filter: 'gaussianBlur',
+      radius: 4,
+    } as never);
+    expect(expectations.map((e) => e.kind)).toEqual(['layer_exists', 'layer_property']);
+    expect(expectations[1]).toMatchObject({ property: 'withinCanvas', equals: true });
+  });
+
+  it('gives the three content-dependent tools no invented check', () => {
+    for (const [op, reason] of Object.entries(NOT_DERIVABLE)) {
+      expect(deriveExpectations(op as never, {} as never), `${op}: ${reason}`).toEqual([]);
+    }
   });
 });

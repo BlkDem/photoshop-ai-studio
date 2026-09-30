@@ -174,6 +174,34 @@ function listDocumentIds() {
   return out;
 }
 
+/**
+ * The active selection, or `null` when there is none.
+ *
+ * Read defensively: `selection.bounds` throws on some builds when nothing is
+ * selected, and a plan that cannot see its selection cannot report one.
+ */
+function documentSelection(doc) {
+  try {
+    var selection = doc.selection;
+    if (!selection) return null;
+    var b = selection.bounds;
+    if (!b) return null;
+    var left = num(b.left, num(b.x, 0));
+    var top = num(b.top, num(b.y, 0));
+    var right = num(b.right, left + num(b.width, 0));
+    var bottom = num(b.bottom, top + num(b.height, 0));
+    return {
+      x: left,
+      y: top,
+      width: right - left,
+      height: bottom - top,
+      feather: num(selection.feather, 0),
+    };
+  } catch (err) {
+    return null;
+  }
+}
+
 function documentInfo(doc) {
   // Every numeric field goes through `num()`: the UXP DOM is loosely typed and
   // returns some of these as strings, which would otherwise fail the MCP server's
@@ -311,6 +339,9 @@ function layerInfo(layer, parentId) {
     parentId: parentId,
     fillOpacity: typeof layer.fillOpacity === 'number' ? round(layer.fillOpacity, 1) : undefined,
     blendMode: layer.blendMode ? String(layer.blendMode) : 'normal',
+    // Derived rather than stored: verification uses it to catch a transform that
+    // left the layer off the canvas, which no single property would show.
+    withinCanvas: withinCanvas(layer),
     isBackground: layer.isBackgroundLayer === true,
     isClippingMask: layer.isClippingMask === true,
     isLocked: layer.locked === true,
@@ -323,6 +354,25 @@ function childIds(layers) {
   var ids = [];
   for (var i = 0; i < layers.length; i += 1) ids.push(layers[i].id);
   return ids;
+}
+
+/**
+ * Whether any of the layer's pixels fall inside the canvas.
+ *
+ * Derived rather than stored, and read by verification: a filter or a transform
+ * that pushed content off the frame reports `false` here instead of looking
+ * exactly like a successful edit. `layerInfo` is handed a parent id rather than a
+ * document, so the layer is asked for its own.
+ */
+function withinCanvas(layer, doc) {
+  try {
+    var b = boundsOf(layer);
+    var d = doc || layer.document || (layer.parent !== undefined ? layer.parent : null);
+    if (!d || !b || typeof d.width !== 'number') return true;
+    return b.x < d.width && b.y < d.height && b.x + b.width > 0 && b.y + b.height > 0;
+  } catch (err) {
+    return true;
+  }
 }
 
 function boundsOf(layer) {
@@ -1032,6 +1082,7 @@ module.exports = {
   documentInfo: documentInfo,
   listDocumentIds: listDocumentIds,
   countLayers: countLayers,
+  documentSelection: documentSelection,
 
   flattenLayers: flattenLayers,
   layerObjects: layerObjects,

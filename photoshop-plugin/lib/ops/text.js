@@ -54,6 +54,18 @@ function createTextLayer(ctx) {
       return ps.resolveCreatedLayer(doc, created);
     })
     .then(function (layer) {
+      // `createTextLayer` names the layer after its **contents**, ignoring the
+      // `name` that was asked for: a layer requested as "Headline" turned up as
+      // "Hello world", and every later step that referred to it by name then
+      // failed with "layer not found". Renaming is cheap and makes the handle the
+      // caller was given actually work.
+      if (params.name && String(layer.name) !== String(params.name)) {
+        try {
+          layer.name = params.name;
+        } catch (err) {
+          /* a layer that cannot be renamed is still usable by id */
+        }
+      }
       if (params.width) setParagraphWidth(layer, params.width);
       return textInfo(doc, layer);
     });
@@ -132,6 +144,35 @@ function underlineValue(on) {
   return on;
 }
 
+/**
+ * The value `characterStyle.strikeThrough` takes.
+ *
+ * A separate enum from `Underline`, and not interchangeable with it: writing an
+ * underline value into this field is how a "strikethrough" request used to be
+ * turned into nonsense, since on this build the underline enum holds only
+ * vertical-text variants.
+ *
+ * The enum object's keys are not the values, and the values are lowercase strings
+ * like `strikethroughOff`, so the "on" value is derived from what Photoshop
+ * currently reports rather than guessed. That way a build that spells it
+ * `strikethroughThick` still works.
+ */
+function strikeThroughValue(on, current) {
+  var enumObject = ps.constants && ps.constants.StrikeThrough;
+  if (enumObject) {
+    for (var key in enumObject) {
+      if (!Object.prototype.hasOwnProperty.call(enumObject, key)) continue;
+      if (/off|none/i.test(key)) continue;
+      if (typeof enumObject[key] !== 'undefined') return enumObject[key];
+    }
+  }
+  if (typeof current === 'string') {
+    var match = current.match(/^(.*?)off$/i);
+    if (match) return match[1] + 'On';
+  }
+  return on;
+}
+
 function setTextStyle(ctx) {
   var doc = ps.resolveDocument(ctx.params.documentId);
   var layer = ps.findLayer(doc, ctx.params);
@@ -144,6 +185,11 @@ function setTextStyle(ctx) {
   var applied = [];
 
 
+  // What each key was actually written as, so the read-back can tell whether
+  // Photoshop kept it. Several of these are silently ignored when given a value
+  // the host dislikes: the assignment returns without throwing and the run would
+  // otherwise report a style change that never happened.
+  var wrote = {};
   var numeric = ['tracking', 'leading', 'baselineShift', 'horizontalScale', 'verticalScale'];
   var booleans = ['fauxBold', 'fauxItalic', 'underline', 'strikethrough'];
 
@@ -152,6 +198,7 @@ function setTextStyle(ctx) {
     if (key === 'leading') return; // paragraph property; handled below
     try {
       style[key] = params[key];
+      wrote[key] = params[key];
       applied.push(key);
     } catch (err) {
       throw StudioError('STEP_FAILED', 'Photoshop would not set ' + key + ' on "' + layer.name + '": ' + ((err && err.message) || String(err)), {
@@ -163,11 +210,18 @@ function setTextStyle(ctx) {
   booleans.forEach(function (key) {
     if (typeof params[key] !== 'boolean') return;
     try {
-      // `underline` and `strikethrough` are not booleans on the DOM: they take a
-      // `Constants.Underline` value, and assigning `true` fails with "'Constants
-      // .Underline' is of type boolean. Expecting type number". The model still
-      // asks for a boolean, because "underlined" is what a request means.
-      style[key] = key === 'fauxBold' || key === 'fauxItalic' ? params[key] : underlineValue(params[key]);
+      // None of these are booleans on the DOM except fauxBold/fauxItalic:
+      // assigning `true` fails with "'Constants.Underline' is of type boolean.
+      // Expecting type number". The model still asks for a boolean, because
+      // "underlined" is what a request means. Each takes its *own* enum:
+      // `Underline` and `StrikeThrough` are separate and not interchangeable.
+      style[key] =
+        key === 'fauxBold' || key === 'fauxItalic'
+          ? params[key]
+          : key === 'strikethrough'
+            ? strikeThroughValue(params[key], readStyle(item && item.characterStyle, 'strikeThrough'))
+            : underlineValue(params[key]);
+      wrote[key] = style[key];
       applied.push(key);
     } catch (err) {
       throw StudioError('STEP_FAILED', 'Photoshop would not set ' + key + ' on "' + layer.name + '": ' + ((err && err.message) || String(err)), {
@@ -193,7 +247,23 @@ function setTextStyle(ctx) {
       // `textInfo` is a promise (it reads the colour back); assigning onto it
       // would put `applied` on the promise object and lose the whole list.
       return textInfo(doc, layer).then(function (info) {
-        info.applied = applied;
+        // Read-back, because writing is not the same as taking: the DOM accepted
+        // a strikethrough value it did not like and changed nothing, without
+        // raising. Anything that did not take is reported as ignored rather than
+        // counted as applied.
+        var kept = applied.filter(function (key) {
+          if (key === 'paragraphWidth') return true;
+          if (key === 'leading') return true;
+          var expected = wrote[key];
+          var actual = info[key];
+          if (typeof expected === 'number' && typeof actual === 'number') {
+            return Math.abs(expected - actual) < 0.51;
+          }
+          return String(actual) === String(expected);
+        });
+        info.applied = kept;
+        var ignored = applied.filter(function (key) { return kept.indexOf(key) === -1; });
+        if (ignored.length) info.ignored = ignored;
         return info;
       });
     });
@@ -266,12 +336,31 @@ function buildTextInfo(doc, layer, color) {
     fontSize: currentFontSize(layer, bounds),
     color: color,
     alignment: currentAlignment(item),
+    tracking: readStyle(item && item.characterStyle, 'tracking'),
+    horizontalScale: readStyle(item && item.characterStyle, 'horizontalScale'),
+    verticalScale: readStyle(item && item.characterStyle, 'verticalScale'),
+    fauxBold: readStyle(item && item.characterStyle, 'fauxBold'),
+    fauxItalic: readStyle(item && item.characterStyle, 'fauxItalic'),
+    underline: readStyle(item && item.characterStyle, 'underline'),
+    strikeThrough: readStyle(item && item.characterStyle, 'strikeThrough'),
+    leading: item && item.paragraphStyle ? readStyle(item.paragraphStyle, 'leading') : undefined,
 
     width: bounds.width,
     height: bounds.height,
     x: bounds.x,
     y: bounds.y,
   };
+}
+
+/** One style property, or `undefined` when the host does not expose it. */
+function readStyle(owner, key) {
+  try {
+    if (!owner) return undefined;
+    var value = owner[key];
+    return typeof value === 'undefined' ? undefined : value;
+  } catch (err) {
+    return undefined;
+  }
 }
 
 function currentFont(layer) {

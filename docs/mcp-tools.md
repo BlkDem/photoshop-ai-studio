@@ -9,24 +9,6 @@
 **Naming** every tool is `photoshop.<operation>`. Dots are explicitly allowed by the
 MCP tools specification.
 
-## Before you plan: `get_capabilities`
-
-`photoshop.get_capabilities` reports what the connected Photoshop will actually
-perform, and it is worth calling before any plan that depends on a feature
-outside the everyday set. It separates:
-
-- `api` — the entry point exists in the live DOM;
-- `usable` — this plugin has performed it on this build and watched it take
-  effect;
-- `note` — why not, when there is something to say.
-
-The distinction is the whole point. `Layer.translate` *exists* and does nothing;
-`placeEvent` exists and refuses every file the plugin can write; `crop` is
-refused outright. A tool surface planned from the API reference is a tool surface
-full of silent no-ops.
-
-It is non-destructive and answers with no document open.
-
 ## Conventions
 
 These hold for all 30 tools:
@@ -81,8 +63,6 @@ plausibly succeed; `false` means stop and tell the user.
 | `FONT_NOT_AVAILABLE` | yes | The requested PostScript font name is not installed. |
 | `INVALID_COLOR` | no | Colour was neither `{r,g,b}` with 0..255 channels nor `"#rrggbb"`. |
 | `PATH_NOT_ALLOWED` | no | The path resolves outside the configured workspace. |
-| `WORKSPACE_NOT_GRANTED` | yes | The plugin has not been granted the workspace folder. Only `place_image` hits this, and only when the bytes were not sent. |
-| `UNSUPPORTED_OPERATION` | no | The host cannot do this at all — see the platform boundary in `architecture.md`. |
 | `FILE_NOT_FOUND` | yes | The referenced file does not exist inside the workspace. |
 | `FILE_EXISTS` | yes | The destination exists; pass `overwrite: true` to replace it. |
 | `EXPORT_FAILED` | yes | Photoshop could not write the file. |
@@ -126,9 +106,17 @@ claiming success.
 | Tool | Title | Destructive | Confirmation | Input | Description |
 | --- | --- | --- | --- | --- | --- |
 | `photoshop.get_document` | Get Document | — | — | 0 props, all optional | Return the complete current state of a document: metadata (id, name, width, height, resolution, colorMode, layerCount) AND the full flat layer list including nested group children with parentId. Call this FIRST whenever you need to know what actually exists before planning anything. |
+| `photoshop.create_document` | Create Document | — | — | 6 props, all optional | Create a new empty document and make it active. Use this when the request is to start something rather than change what is open — otherwise work on the document the user already has, because opening a new one hides their work. |
+| `photoshop.get_documents` | Get Documents | — | — | 0 props, all optional | List the open documents and which one is active. Cheap: it reads no layer data, so it is the right first call when deciding what to work on. |
+| `photoshop.close_document` | Close Document | **yes** | **required** | 2 props, all optional | Close a document. With `save: false` (the default) unsaved changes are discarded, which is destructive; with `save: true` the document is saved to its current path first. |
+| `photoshop.get_capabilities` | Get Capabilities | — | — | 0 props, all optional | Report which Photoshop features this build actually supports. Non-destructive: it inspects the API surface and the plugin's own record of what it has verified, and never touches the document. Call it before planning work that depends on masks, adjustments, selections or smart objects, so an unsupported feature can be refused up front rather than failing halfway through. |
 | `photoshop.get_document_info` | Get Document Info | — | — | 0 props, all optional | Return only document metadata (id, name, width, height, resolution, colorMode, layerCount). Cheaper than get_document because it skips the layer walk. Use when you only need canvas geometry. |
 | `photoshop.duplicate_document` | Duplicate Document | — | — | 2 props, all optional | Duplicate the target document. The copy becomes the active document and all following operations apply to it. Use this to safely derive a variant (for example a square version) without touching the original. |
 | `photoshop.save_document` | Save Document | **yes** | **required** | 4 props, all optional | Save the document as PSD. Without `path` it saves in place, which OVERWRITES the original file — prefer `path` for anything AI-generated. |
+| `photoshop.sample_color` | Sample Colour | — | — | 4 props, 2 required | Read the colour at a point in the document. The way to pick up a brand colour from an existing asset without guessing it. `radius` averages over a square, which is what you want for a gradient or a photo. |
+| `photoshop.flatten_document` | Flatten Document | **yes** | **required** | 1 props, all optional | Merge every visible layer into one, discarding hidden layers. Irreversible, and the single most destructive thing in this tool surface. |
+| `photoshop.merge_visible_layers` | Merge Visible Layers | **yes** | **required** | 1 props, all optional | Merge the visible layers into one, keeping hidden layers. Irreversible. |
+| `photoshop.convert_color_mode` | Convert Colour Mode | **yes** | **required** | 2 props, 1 required | Convert the document between RGB, CMYK, Gray and Lab. Irreversible from the user's point of view once saved, and it changes every colour in the document — a conversion to CMYK will visibly shift a web palette. |
 
 ### 2. Layers
 
@@ -141,10 +129,15 @@ claiming success.
 | `photoshop.rename_layer` | Rename Layer | — | — | 3 props, 1 required | Rename an existing layer. Returns the updated layer. |
 | `photoshop.move_layer` | Move Layer | — | — | 6 props, all optional | Move a layer in document pixel space. Provide x/y for the new top-left corner, or neither to move by a relative delta via dx/dy. Coordinates are absolute pixels from the canvas top-left, origin y grows downward. |
 | `photoshop.set_layer_visibility` | Set Layer Visibility | — | — | 3 props, 1 required | Show or hide a layer. `visible: false` hides it without deleting anything, which makes it the safe way to test a layout. |
+| `photoshop.set_layer_blend_mode` | Set Layer Blend Mode | — | — | 3 props, 1 required | Set how a layer combines with what is beneath it. The names are the DOM's, not the Photoshop UI's: `colorDodge` is Colour Dodge, `softLight` is Soft Light. |
+| `photoshop.set_layer_fill_opacity` | Set Layer Fill Opacity | — | — | 3 props, 1 required | Set fill opacity (0-100), which fades the layer content without touching a mask or an opacity that would also fade any layer effects. Distinct from `set_layer_opacity`. |
 | `photoshop.set_layer_opacity` | Set Layer Opacity | — | — | 3 props, 1 required | Set layer opacity as a percentage from 0 (fully transparent) to 100 (opaque). |
 | `photoshop.create_group` | Create Group | — | — | 3 props, 1 required | Create a layer group, optionally placing existing layers inside it. Without `layer` the group is created empty at the top of the stacking order. |
 | `photoshop.move_layer_to_group` | Move Layer To Group | — | — | 2 props, 2 required | Move a layer into an existing group, preserving relative stacking order. |
 | `photoshop.reorder_layer` | Reorder Layer | — | — | 3 props, 2 required | Change the stacking order of a layer. `placement` is one of placeAtEnd (top), placeAtBeginning (bottom), placeBefore, placeAfter (relative to `target`). |
+| `photoshop.flip_layer` | Flip Layer | **yes** | **required** | 3 props, all optional | Mirror a layer horizontally or vertically. Destructive; no undo. |
+| `photoshop.rotate_layer` | Rotate Layer | **yes** | **required** | 4 props, all optional | Rotate a layer's content about its centre, in degrees clockwise. `interpolation` maps to Photoshop's own setting: `nearestNeighbor` keeps hard edges, `bilinear` is the default, `bicubic` is smoothest. Destructive; no undo. |
+| `photoshop.rasterize_layer` | Rasterize Layer | **yes** | **required** | 2 props, all optional | Flatten a layer's live effects into its pixels. Irreversible, and the reason it is gated: after rasterizing there is no way to lower the opacity of an effect independently. Only useful as a deliberate final step. |
 
 ### 3. Text
 
@@ -153,6 +146,7 @@ claiming success.
 | `photoshop.create_text_layer` | Create Text Layer | — | — | 10 props, 1 required | Create a new text layer. `font` is a PostScript name (e.g. "MyriadPro-Bold"); omit it to inherit the last used font. `x`/`y` place the bottom-left of the text box. `width` makes it paragraph text that wraps at that width instead of a single line. |
 | `photoshop.get_text_layer` | Get Text Layer | — | — | 2 props, all optional | Return content, font, size, colour and geometry of a text layer. |
 | `photoshop.update_text_layer` | Update Text Layer | — | — | 7 props, all optional | Change the content and/or typographic properties of a text layer. Only the fields you provide are modified. Note that Photoshop auto-resizes point-text layers to fit the new string. |
+| `photoshop.set_text_style` | Set Text Style | — | — | 12 props, all optional | Set character and paragraph properties on a text layer: tracking, leading, faux bold and italic, underline, strikethrough, baseline shift, scale, and the paragraph wrap width. Only the fields you pass are changed. Prefer this over several one-property tools — a caption is usually 'condensed and italic', not two separate intents. |
 | `photoshop.set_text_position` | Set Text Position | — | — | 4 props, 2 required | Move a text layer so its text-box origin sits at (x, y) in document pixels. |
 | `photoshop.set_text_font_size` | Set Text Font Size | — | — | 3 props, 1 required | Set the point size of a text layer (1..1296 at 72 ppi). |
 | `photoshop.set_text_color` | Set Text Color | — | — | 3 props, 1 required | Set the fill colour of a text layer. Accepts {"r":..,"g":..,"b":..} or "#rrggbb". |
@@ -163,11 +157,14 @@ claiming success.
 | --- | --- | --- | --- | --- | --- |
 | `photoshop.place_image` | Place Image | — | — | 4 props, 1 required | Place an external image file as a new layer. `path` must live inside the configured workspace. `fit` scales the placed layer; omit it to keep the native pixel size. |
 | `photoshop.resize_layer` | Resize Layer | — | — | 7 props, all optional | Scale a layer to an absolute width/height, or by a ratio when `scale` is given. Smart objects resize without quality loss; raster layers are resampled with `resample`. |
+| `photoshop.apply_filter` | Apply Filter | **yes** | **required** | 0 props, all optional | Apply a filter to a layer, destructively. Twenty-five filters, all on the DOM and all exercised against a real Photoshop. Two consequences worth knowing: a filter applied to a text or shape layer rasterizes it, so later text edits are no longer possible on that layer; and nothing here is undoable, because the plugin has no history tool. Work on a duplicate if the layer matters. |
 
 ### 5. Canvas
 
 | Tool | Title | Destructive | Confirmation | Input | Description |
 | --- | --- | --- | --- | --- | --- |
+| `photoshop.trim_document` | Trim Document | **yes** | **required** | 2 props, all optional | Crop the canvas to the content, discarding the transparent margin. `type` mirrors Photoshop's own: transparent pixels, or the colour in the corner. |
+| `photoshop.set_selection` | Set Selection | — | — | 7 props, 1 required | Change the active selection. `mode` is `all`, `rectangle`, `ellipse`, `none` or `invert`; a rectangle/ellipse takes x, y, width, height in document pixels and may be feathered. `invert` flips the current selection. Note that this is the marching-ants selection, which the plugin uses to scope the adjustment operations — it is not applied to anything by itself. |
 | `photoshop.resize_canvas` | Resize Canvas | — | — | 4 props, 2 required | Change the canvas size WITHOUT scaling pixel content — existing artwork keeps its size and position, so surrounding design usually needs follow-up move_layer steps. anchor decides which edge stays fixed. |
 | `photoshop.crop_document` | Crop Document | **yes** | **required** | 5 props, 4 required | Crop the canvas to the rectangle (x, y, width, height) in document pixels. Pixels outside the rectangle are discarded — prefer resize_canvas when you want to keep content. |
 

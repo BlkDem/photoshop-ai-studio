@@ -76,8 +76,26 @@ export const TextLayerInfoSchema = z.object({
   /** Point-text origin in document pixels. */
   x: z.number().optional(),
   y: z.number().optional(),
-  /** Fields from a patch request that Photoshop actually applied. */
+  /**
+   * Fields from the patch request that Photoshop actually applied.
+   *
+   * Verified by reading the values back, not by whether the assignment threw:
+   * the DOM accepts a style value it does not like and changes nothing.
+   */
   applied: z.array(z.string()).optional(),
+  /** Requested fields the host silently ignored, so a run can say so. */
+  ignored: z.array(z.string()).optional(),
+  /** Letter spacing, in 1/1000 em. */
+  tracking: z.number().optional(),
+  horizontalScale: z.number().optional(),
+  verticalScale: z.number().optional(),
+  fauxBold: z.boolean().optional(),
+  fauxItalic: z.boolean().optional(),
+  /** The DOM's own underline/strikethrough enum value, not a boolean. */
+  underline: z.string().optional(),
+  strikeThrough: z.string().optional(),
+  /** Line spacing, as a percentage of the font size. */
+  leading: z.number().optional(),
 });
 
 export type TextLayerInfo = z.infer<typeof TextLayerInfoSchema>;

@@ -59,6 +59,23 @@ export type DocumentInfo = z.infer<typeof DocumentInfoSchema>;
 export const DocumentStateSchema = DocumentInfoSchema.extend({
   /** Flat, bottom-to-top, including nested group children. */
   layers: z.array(LayerInfoSchema),
+  /**
+   * The active selection, or `null` when nothing is selected.
+   *
+   * Part of the state because a selection is real, user-visible state: a plan that
+   * sets one and then acts on the document should be able to say what was
+   * selected, and verification needs something to check `set_selection` against.
+   */
+  selection: z
+    .object({
+      x: z.number(),
+      y: z.number(),
+      width: z.number(),
+      height: z.number(),
+      feather: z.number().optional(),
+    })
+    .nullable()
+    .optional(),
 });
 
 export type DocumentState = z.infer<typeof DocumentStateSchema>;

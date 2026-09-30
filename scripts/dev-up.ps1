@@ -62,9 +62,18 @@ function Start-ProcessLogged($name, $arguments) {
   Write-Step "  $name pid $($process.Id)  -> logs\$name.log"
 }
 
+# The build is not tidiness. A server started from an older `dist` keeps that
+# older code for its whole lifetime, and the symptom points somewhere else
+# entirely: the plugin reports a field that a result schema predating it then
+# strips, so a check written against that field fails for a reason that no longer
+# exists in the source. Building here is what keeps the running code and `dist/`
+# from disagreeing.
 Write-Step 'building…'
 & npm run build *> $null
-if ($LASTEXITCODE -ne 0) { Write-Error 'build failed'; exit 1 }
+if ($LASTEXITCODE -ne 0) {
+  Write-Error 'build failed — refusing to start the servers on a stale dist'
+  exit 1
+}
 
 Start-ProcessLogged 'mcp' @('mcp-server/dist/index.js')
 Start-ProcessLogged 'orchestrator' @('orchestrator/dist/index.js')

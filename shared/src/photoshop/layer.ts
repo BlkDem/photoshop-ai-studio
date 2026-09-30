@@ -104,6 +104,13 @@ export const LayerInfoSchema = z.object({
   // --- optional enrichment ------------------------------------------------
   fillOpacity: z.number().min(0).max(100).optional(),
   blendMode: ReportedBlendModeSchema.optional(),
+  /**
+   * Whether the layer still overlaps the canvas.
+   *
+   * Derived, and read by verification: a transform that pushed the content off
+   * the frame looks exactly like a successful edit otherwise.
+   */
+  withinCanvas: z.boolean().optional(),
   isBackground: z.boolean().optional(),
   isClippingMask: z.boolean().optional(),
   isLocked: z.boolean().optional(),
