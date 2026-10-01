@@ -1314,3 +1314,202 @@ h4 {
 .empty code {
   color: var(--text-dim);
 }
+
+/* --------------------------------------------------------- models panel */
+
+.meta--button {
+  cursor: pointer;
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: var(--radius);
+  padding: 2px 6px;
+  font: inherit;
+  color: var(--text-dim);
+}
+
+.meta--button:hover {
+  color: var(--text);
+  border-color: var(--line-strong);
+}
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 48px 24px;
+  background: rgb(0 0 0 / 55%);
+  overflow: auto;
+}
+
+.modal__panel {
+  width: min(880px, 100%);
+  max-height: calc(100vh - 96px);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-raised);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  box-shadow: 0 24px 60px rgb(0 0 0 / 45%);
+}
+
+.modal__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.modal__head h2 {
+  margin: 0;
+  font-size: 14px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.modal__body {
+  padding: 18px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.models__roles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+.models__role {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.models__role-label {
+  display: flex;
+  flex-direction: column;
+}
+
+.models__role-label span {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.input {
+  width: 100%;
+  padding: 7px 9px;
+  font: inherit;
+  color: var(--text);
+  background: #1b1e24;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+}
+
+.input:focus {
+  outline: none;
+  border-color: var(--accent-dim);
+}
+
+.models__list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.model {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  background: #1b1e24;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.model__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.model__meta,
+.model__probe {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.model__probe {
+  color: var(--accent);
+}
+
+.model__actions {
+  display: flex;
+  gap: 6px;
+  flex: none;
+}
+
+.btn--danger:hover:not(:disabled) {
+  border-color: #8c4048;
+  color: #ffc9ce;
+}
+
+.models__form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.models__form h3 {
+  margin: 0;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.models__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.field span {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.models__hint {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.models__form-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.banner--ok {
+  margin: 0;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: #bfe6c6;
+  background: #1d2a20;
+  border: 1px solid #2f4634;
+  border-radius: var(--radius);
+}

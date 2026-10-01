@@ -1,6 +1,11 @@
 import type {
+  AssignRoleRequest,
   ChatRequest,
   HistoryRecord,
+  ModelProbe,
+  ModelProfile,
+  ModelProfileInput,
+  ModelRegistry,
   Run,
   RunDetail,
   StudioEvent,
@@ -83,6 +88,24 @@ export const api = {
     request<RunDetail>(`/runs/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
   history: (limit = 50): Promise<{ records: HistoryRecord[] }> =>
     request<{ records: HistoryRecord[] }>(`/history?limit=${limit}`),
+
+  // --- model registry ------------------------------------------------------
+  //
+  // An `apiKey` is only ever sent, never read back: the orchestrator reports
+  // `hasApiKey` instead, so an edit that does not retype the key leaves the
+  // stored one alone.
+
+  models: (): Promise<Pick<ModelRegistry, 'profiles' | 'roles'>> => request('/models'),
+  addModel: (input: ModelProfileInput): Promise<ModelProfile> =>
+    request<ModelProfile>('/models', { method: 'POST', body: JSON.stringify(input) }),
+  updateModel: (id: string, patch: Partial<ModelProfileInput>): Promise<ModelProfile> =>
+    request<ModelProfile>(`/models/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  removeModel: (id: string): Promise<void> =>
+    request<void>(`/models/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  assignModel: (id: string, body: AssignRoleRequest): Promise<Pick<ModelRegistry, 'profiles' | 'roles'>> =>
+    request(`/models/${encodeURIComponent(id)}/assign`, { method: 'POST', body: JSON.stringify(body) }),
+  probeModel: (id: string): Promise<ModelProbe> =>
+    request<ModelProbe>(`/models/${encodeURIComponent(id)}/probe`, { method: 'POST' }),
 };
 
 /**

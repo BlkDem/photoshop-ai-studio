@@ -8,6 +8,7 @@ export interface HeaderProps {
   model: ModelRoles | null;
   jev: { mode: string; runtimeUrl: string | null } | null;
   onReload: () => void;
+  onOpenModels: () => void;
 }
 
 /**
@@ -23,6 +24,7 @@ export function Header({
   model,
   jev,
   onReload,
+  onOpenModels,
 }: HeaderProps): React.JSX.Element {
   const photoshopConnected = connection?.connected === true;
   const label = !streamConnected
@@ -52,9 +54,9 @@ export function Header({
         )}
 
         {model ? (
-          <span className="meta meta__dim" title="Model Gateway roles (AI_PLANNER_* / AI_VISION_* / AI_FAST_*)">
+          <button type="button" className="meta meta__dim meta--button" title="Add, remove and route models" onClick={onOpenModels}>
             {model.planner.provider}/{model.planner.model}
-          </span>
+          </button>
         ) : null}
 
         {jev ? <span className="meta meta__dim">JEV: {jev.mode}</span> : null}
