@@ -66,8 +66,16 @@ function createTextLayer(ctx) {
           /* a layer that cannot be renamed is still usable by id */
         }
       }
-      if (params.width) setParagraphWidth(layer, params.width);
-      return textInfo(doc, layer);
+      // Awaited, not fired and forgotten: `setParagraphWidth` converts the layer
+      // to paragraph text and resizes it asynchronously. Calling it without
+      // waiting let `textInfo` describe the layer *before* the resize landed,
+      // so the step reported pre-resize bounds and the glyphs finished scaling
+      // after the plan had already described them — a caption that verified
+      // clean and rendered off the canvas. Kept inside this callback so `layer`
+      // stays in scope.
+      return Promise.resolve(params.width ? setParagraphWidth(layer, params.width) : null).then(function () {
+        return textInfo(doc, layer);
+      });
     });
 }
 
