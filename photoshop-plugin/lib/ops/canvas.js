@@ -11,12 +11,83 @@ var StudioError = require('../errors.js').StudioError;
 
 /** `get_document`: metadata *and* the full layer list in one round trip. */
 function getDocument(ctx) {
-  var doc = ps.resolveDocument(ctx.params.documentId);
-  var info = ps.documentInfo(doc);
-  info.layers = ps.flattenLayers(doc.layers);
   // The snapshot carries the selection so a plan can see what it is acting on and
   // `set_selection` has a mechanical post-condition.
+  return documentState(ps.resolveDocument(ctx.params.documentId));
+}
+
+
+/**
+ * `modify_selection` — change the selection that already exists.
+ *
+ * Splitting this out of `set_selection` is deliberate. `set_selection` *replaces*
+ * the selection from coordinates the caller had to work out; these operations
+ * express an intent ("grow it a little", "smooth the edge") that needs no
+ * coordinates and no knowledge of what is underneath.
+ *
+ * Only "is something selected" is reported as verified. How far `grow` actually
+ * gets depends on the artwork and the canvas edge, so a derived size would be a
+ * guess; the returned document state carries the real bounds instead.
+ */
+function modifySelection(ctx) {
+  var doc = ps.resolveDocument(ctx.params.documentId);
+  var action = ctx.params.action;
+  var amount = typeof ctx.params.amount === 'number' ? ctx.params.amount : null;
+  var selection = doc.selection;
+
+  if (!selection) {
+    throw StudioError('UNSUPPORTED_OPERATION', 'This Photoshop build exposes no selection object.', { recoverable: false });
+  }
+
+  /** Actions that are meaningless without an existing selection. */
+  var needsSelection = { grow: 1, shrink: 1, expand: 1, smooth: 1, border: 1 };
+
+  if (needsSelection[action]) {
+    if (amount === null) {
+      throw StudioError('INVALID_PARAMS', 'Selection "' + action + '" needs an `amount` in pixels.');
+    }
+    var before = ps.documentSelection(doc);
+    if (!before) {
+      throw StudioError(
+        'INVALID_PARAMS',
+        'Selection "' + action + '" needs a selection to already exist. Call `set_selection` first.',
+      );
+    }
+  }
+
+  var step;
+  try {
+    if (action === 'grow') step = selection.grow(amount);
+    else if (action === 'shrink') step = selection.contract(amount);
+    else if (action === 'expand') step = selection.expand(amount);
+    else if (action === 'smooth') step = selection.smooth(amount);
+    else if (action === 'border') step = selection.selectBorder(amount);
+    else if (action === 'invert') step = typeof selection.inverse === 'function' ? selection.inverse() : undefined;
+    else if (action === 'selectAll') step = selection.selectAll();
+    else step = selection.deselect();
+  } catch (err) {
+    throw StudioError('STEP_FAILED', 'Photoshop would not ' + action + ' the selection: ' + ((err && err.message) || String(err)), {
+      recoverable: true,
+    });
+  }
+
+  return Promise.resolve(step)
+    .catch(function (err) {
+      throw StudioError('STEP_FAILED', 'Photoshop would not ' + action + ' the selection: ' + ((err && err.message) || String(err)), {
+        recoverable: true,
+      });
+    })
+    .then(function () {
+      return documentState(doc);
+    });
+}
+
+/** The full document state, as `get_document` reports it. */
+function documentState(doc) {
+  var info = ps.documentInfo(doc);
+  info.layers = ps.flattenLayers(doc.layers);
   info.selection = ps.documentSelection(doc);
+  info.selectionActive = info.selection !== null;
   return info;
 }
 
@@ -421,6 +492,7 @@ function convertColorMode(ctx) {
 
 module.exports = {
   set_selection: setSelection,
+  modify_selection: modifySelection,
   create_document: createDocument,
   get_documents: getDocuments,
   close_document: closeDocument,

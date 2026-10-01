@@ -1051,6 +1051,107 @@ function enumValue(enumName, key, fallback) {
   return fallback === undefined ? key : fallback;
 }
 
+/** `"#rrggbb"` or `{r,g,b}` to a clamped RGB triple. */
+function normalizeColor(color) {
+  if (typeof color === 'string') {
+    var hex = color.replace('#', '');
+    if (hex.length !== 6) throw StudioError('INVALID_COLOR', 'Expected "#rrggbb", received "' + color + '"');
+    return {
+      r: parseInt(hex.slice(0, 2), 16),
+      g: parseInt(hex.slice(2, 4), 16),
+      b: parseInt(hex.slice(4, 6), 16),
+    };
+  }
+  if (!color || typeof color.r !== 'number') {
+    throw StudioError('INVALID_COLOR', 'Expected {r,g,b} or "#rrggbb"');
+  }
+  return { r: clampByte(color.r), g: clampByte(color.g), b: clampByte(color.b) };
+}
+
+
+/**
+ * Produces a `SolidColor` for the document's colour mode, restoring whatever the
+ * user had as the foreground colour afterwards.
+ *
+ * There is no direct way to build one on Photoshop 26.11:
+ *
+ *  - `app.solidColor(...)` does not exist;
+ *  - `new app.SolidColor(...)` accepts an argument and ignores it, always
+ *    producing white;
+ *  - `TextItem.characterStyle.color` rejects anything that is not a real
+ *    `SolidColor` ("'color' is of type object. Expecting type SolidColor"), so a
+ *    plain `{r,g,b}` cannot be assigned at all.
+ *
+ * The foreground colour *is* a real `SolidColor` and setting it with a
+ * `_ref: 'color'` descriptor is supported. So: set it, hand it over, put it back.
+ * The window in which the user's foreground colour differs is one batchPlay.
+ */
+function withForegroundColor(rgb, fn) {
+  if (!app) {
+    return Promise.reject(
+      StudioError('UNSUPPORTED_OPERATION', 'This Photoshop build exposes no way to build a colour.', {
+        recoverable: false,
+      }),
+    );
+  }
+
+  var previous;
+  try {
+    previous = app.foregroundColor;
+  } catch (err) {
+    previous = undefined;
+  }
+
+  var restore = function () {
+    if (!previous) return Promise.resolve();
+    try {
+      app.foregroundColor = previous;
+    } catch (err) {
+      // The colour is cosmetic; failing the edit over the restore is worse.
+    }
+    return Promise.resolve();
+  };
+
+  return batchPlay([
+      {
+        _obj: 'set',
+        _target: [{ _ref: 'color', _property: 'foregroundColor' }],
+        to: { _obj: 'RGBColor', red: rgb.r, green: rgb.g, blue: rgb.b },
+        _options: { dialogOptions: 'dontDisplay' },
+      },
+    ])
+    .then(function () {
+      return fn(app.foregroundColor);
+    })
+    .then(
+      function (value) {
+        return restore().then(function () {
+          return value;
+        });
+      },
+      function (err) {
+        return restore().then(function () {
+          throw err;
+        });
+      },
+    );
+}
+
+
+/** A `SolidColor` for `createTextLayer`'s `textColor` option. */
+function solidColor(doc, color) {
+  var rgb = normalizeColor(color);
+  var captured = null;
+  return withForegroundColor(rgb, function (solid) {
+    captured = solid;
+  }).then(function () {
+    return captured;
+  });
+}
+
+function clampByte(value) {
+  return Math.max(0, Math.min(255, Math.round(Number(value) || 0)));
+}
 function round(value, decimals) {
   if (typeof value !== 'number' || !isFinite(value)) return 0;
   var factor = Math.pow(10, decimals || 0);
@@ -1058,6 +1159,10 @@ function round(value, decimals) {
 }
 
 module.exports = {
+  clampByte: clampByte,
+  normalizeColor: normalizeColor,
+  withForegroundColor: withForegroundColor,
+  solidColor: solidColor,
   materialize: materialize,
   openDocument: openDocument,
   closeScratchDocument: closeScratchDocument,

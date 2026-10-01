@@ -673,3 +673,40 @@ describe('DOM-backed operations, enumerated rather than assumed', () => {
     expect(ps.enumValue('NoSuchEnum', 'whatever')).toBe('whatever');
   });
 });
+
+describe('the module boundary', () => {
+  /**
+   * Helpers shared between plugin modules live in `lib/ps.js` and are reached as
+   * `ps.name`. Moving one out of an ops file without adding the export — or leaving
+   * a call site bare — produces a `ReferenceError` *inside a function body*, which
+   * every other check here misses: the module still loads, and the operation only
+   * fails when a user reaches for that particular tool.
+   *
+   * That is exactly what happened to `withForegroundColor`, and the live sweep is
+   * what caught it, several minutes and one Photoshop restart later.
+   */
+  const psExports = new Set(Object.keys(loadPluginFile(pluginRoot, 'lib/ps.js') as object));
+
+  const sharedHelpers = ['normalizeColor', 'withForegroundColor', 'solidColor', 'clampByte'];
+
+  const sources = ['lib/ops/text.js', 'lib/ops/layers.js', 'lib/ops/canvas.js', 'lib/ops/images.js', 'lib/ops/filters.js'];
+
+  it.each(sources)('%s reaches every ps helper through `ps`', (relative) => {
+    const source = readFileSync(join(pluginRoot, relative), 'utf8').replace(/require\([^)]*\)/g, '');
+
+    for (const helper of sharedHelpers) {
+      const bare = new RegExp(`(?<![.\\w])${helper}\\s*\\(`);
+      expect(bare.test(source), `${relative} calls ${helper}() bare; it lives in ps.js, so it must be ps.${helper}()`).toBe(false);
+    }
+  });
+
+  it.each(sources)('%s only reaches ps helpers that exist', (relative) => {
+    // `require('../ps.js')` matches the same pattern and is not a helper call.
+    const source = readFileSync(join(pluginRoot, relative), 'utf8').replace(/require\([^)]*\)/g, '');
+    const referenced = [...source.matchAll(/\bps\.([A-Za-z_]\w*)/g)].map((match) => match[1]!);
+
+    for (const name of new Set(referenced)) {
+      expect(psExports.has(name), `${relative} calls ps.${name}(), which lib/ps.js does not export`).toBe(true);
+    }
+  });
+});

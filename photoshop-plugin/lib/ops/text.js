@@ -35,7 +35,7 @@ function createTextLayer(ctx) {
   // round trip through Photoshop, so the whole call is deferred rather than
   // creating the layer and colouring it afterwards — a layer that appears then
   // turns colour is a worse outcome than one that appears already right.
-  return (params.color ? solidColor(doc, params.color) : Promise.resolve(null))
+  return (params.color ? ps.solidColor(doc, params.color) : Promise.resolve(null))
     .then(function (textColor) {
       if (textColor) options.textColor = textColor;
       try {
@@ -69,6 +69,67 @@ function createTextLayer(ctx) {
       if (params.width) setParagraphWidth(layer, params.width);
       return textInfo(doc, layer);
     });
+}
+
+
+/**
+ * `list_fonts` — what is actually installed on this machine.
+ *
+ * A font name that is not installed fails when Photoshop renders the text, not
+ * when the layer is created, so a plan that guesses a face produces a layer that
+ * looks right in the state and wrong in the output. Reading the real list first
+ * is the difference between a name that works and one that quietly falls back.
+ *
+ * `postScriptName` is what a text layer should be given: a family has a Regular,
+ * a Bold and an Italic, and they are separate fonts sharing one family name.
+ */
+function listFonts(ctx) {
+  var params = ctx.params || {};
+  var fonts = ps.app && ps.app.fonts ? ps.app.fonts : null;
+  if (!fonts) {
+    throw StudioError('UNSUPPORTED_OPERATION', 'This Photoshop build does not expose its installed fonts.', {
+      recoverable: false,
+    });
+  }
+
+  var search = typeof params.search === 'string' ? params.search.toLowerCase() : null;
+  var family = typeof params.family === 'string' ? params.family.toLowerCase() : null;
+  var limit = typeof params.limit === 'number' ? params.limit : 200;
+
+  var matched = [];
+  for (var i = 0; i < fonts.length; i += 1) {
+    var font = fonts[i];
+    if (!font) continue;
+    var record = {
+      name: String(font.name || ''),
+      family: String(font.family || ''),
+      style: String(font.style || ''),
+      postScriptName: String(font.postScriptName || ''),
+    };
+    // An entry with no PostScript name cannot be asked for, and offering it would
+    // produce a call that is guaranteed to fall back.
+    if (!record.postScriptName) continue;
+    if (family && record.family.toLowerCase() !== family) continue;
+    if (search) {
+      var haystack = (record.name + ' ' + record.family + ' ' + record.postScriptName).toLowerCase();
+      if (haystack.indexOf(search) === -1) continue;
+    }
+    matched.push(record);
+  }
+
+  // Sorted by family then style so the same query returns the same order: a list
+  // that reshuffles between calls is impossible to reason about from a plan.
+  matched.sort(function (a, b) {
+    if (a.family !== b.family) return a.family < b.family ? -1 : 1;
+    if (a.style !== b.style) return a.style < b.style ? -1 : 1;
+    return a.postScriptName < b.postScriptName ? -1 : 1;
+  });
+
+  return {
+    total: matched.length,
+    truncated: matched.length > limit,
+    fonts: matched.slice(0, limit),
+  };
 }
 
 /** `get_text_layer` */
@@ -463,7 +524,7 @@ function solidColorToRgb(color) {
   }
 
   if (descriptor && descriptor._obj === 'RGBColor') {
-    return { r: clampByte(descriptor.red), g: clampByte(descriptor.green), b: clampByte(descriptor.blue) };
+    return { r: ps.clampByte(descriptor.red), g: ps.clampByte(descriptor.green), b: ps.clampByte(descriptor.blue) };
   }
   if (descriptor && descriptor._obj === 'CMYKColor') {
     var c = Number(descriptor.cyan) / 100;
@@ -471,19 +532,19 @@ function solidColorToRgb(color) {
     var y = Number(descriptor.yellow) / 100;
     var k = Number(descriptor.black) / 100;
     return {
-      r: clampByte(255 * (1 - Math.min(1, c + k))),
-      g: clampByte(255 * (1 - Math.min(1, m + k))),
-      b: clampByte(255 * (1 - Math.min(1, y + k))),
+      r: ps.clampByte(255 * (1 - Math.min(1, c + k))),
+      g: ps.clampByte(255 * (1 - Math.min(1, m + k))),
+      b: ps.clampByte(255 * (1 - Math.min(1, y + k))),
     };
   }
   if (descriptor && descriptor._obj === 'GrayColor') {
-    var gray = clampByte(Number(descriptor.gray) * 255);
+    var gray = ps.clampByte(Number(descriptor.gray) * 255);
     return { r: gray, g: gray, b: gray };
   }
 
   if (color.rgb) {
     var rgb = color.rgb;
-    return { r: clampByte(rgb.red), g: clampByte(rgb.green), b: clampByte(rgb.blue) };
+    return { r: ps.clampByte(rgb.red), g: ps.clampByte(rgb.green), b: ps.clampByte(rgb.blue) };
   }
   if (color.cmyk) {
     var cmyk = color.cmyk;
@@ -492,9 +553,9 @@ function solidColorToRgb(color) {
     var yy = Number(cmyk.yellow) / 100;
     var kk = Number(cmyk.black) / 100;
     return {
-      r: clampByte(255 * (1 - Math.min(1, cc + kk))),
-      g: clampByte(255 * (1 - Math.min(1, mm + kk))),
-      b: clampByte(255 * (1 - Math.min(1, yy + kk))),
+      r: ps.clampByte(255 * (1 - Math.min(1, cc + kk))),
+      g: ps.clampByte(255 * (1 - Math.min(1, mm + kk))),
+      b: ps.clampByte(255 * (1 - Math.min(1, yy + kk))),
     };
   }
   return { r: 0, g: 0, b: 0 };
@@ -543,113 +604,15 @@ function applyAlignment(layer, alignment) {
 
 /** Applies a colour to every character run of a text layer. */
 function applyColor(doc, layer, color) {
-  var rgb = normalizeColor(color);
-  return withForegroundColor(rgb, function (solid) {
+  var rgb = ps.normalizeColor(color);
+  return ps.withForegroundColor(rgb, function (solid) {
     characterStyle(layer).color = solid;
   });
 }
 
-/** `"#rrggbb"` or `{r,g,b}` to a clamped RGB triple. */
-function normalizeColor(color) {
-  if (typeof color === 'string') {
-    var hex = color.replace('#', '');
-    if (hex.length !== 6) throw StudioError('INVALID_COLOR', 'Expected "#rrggbb", received "' + color + '"');
-    return {
-      r: parseInt(hex.slice(0, 2), 16),
-      g: parseInt(hex.slice(2, 4), 16),
-      b: parseInt(hex.slice(4, 6), 16),
-    };
-  }
-  if (!color || typeof color.r !== 'number') {
-    throw StudioError('INVALID_COLOR', 'Expected {r,g,b} or "#rrggbb"');
-  }
-  return { r: clampByte(color.r), g: clampByte(color.g), b: clampByte(color.b) };
-}
 
-function clampByte(value) {
-  return Math.max(0, Math.min(255, Math.round(Number(value) || 0)));
-}
 
-/**
- * Produces a `SolidColor` for the document's colour mode, restoring whatever the
- * user had as the foreground colour afterwards.
- *
- * There is no direct way to build one on Photoshop 26.11:
- *
- *  - `app.solidColor(...)` does not exist;
- *  - `new app.SolidColor(...)` accepts an argument and ignores it, always
- *    producing white;
- *  - `TextItem.characterStyle.color` rejects anything that is not a real
- *    `SolidColor` ("'color' is of type object. Expecting type SolidColor"), so a
- *    plain `{r,g,b}` cannot be assigned at all.
- *
- * The foreground colour *is* a real `SolidColor` and setting it with a
- * `_ref: 'color'` descriptor is supported. So: set it, hand it over, put it back.
- * The window in which the user's foreground colour differs is one batchPlay.
- */
-function withForegroundColor(rgb, fn) {
-  var app = ps.app;
-  if (!app) {
-    return Promise.reject(
-      StudioError('UNSUPPORTED_OPERATION', 'This Photoshop build exposes no way to build a colour.', {
-        recoverable: false,
-      }),
-    );
-  }
 
-  var previous;
-  try {
-    previous = app.foregroundColor;
-  } catch (err) {
-    previous = undefined;
-  }
-
-  var restore = function () {
-    if (!previous) return Promise.resolve();
-    try {
-      app.foregroundColor = previous;
-    } catch (err) {
-      // The colour is cosmetic; failing the edit over the restore is worse.
-    }
-    return Promise.resolve();
-  };
-
-  return ps
-    .batchPlay([
-      {
-        _obj: 'set',
-        _target: [{ _ref: 'color', _property: 'foregroundColor' }],
-        to: { _obj: 'RGBColor', red: rgb.r, green: rgb.g, blue: rgb.b },
-        _options: { dialogOptions: 'dontDisplay' },
-      },
-    ])
-    .then(function () {
-      return fn(app.foregroundColor);
-    })
-    .then(
-      function (value) {
-        return restore().then(function () {
-          return value;
-        });
-      },
-      function (err) {
-        return restore().then(function () {
-          throw err;
-        });
-      },
-    );
-}
-
-/** A `SolidColor` for `createTextLayer`'s `textColor` option. */
-function solidColor(doc, color) {
-  var rgb = normalizeColor(color);
-  var captured = null;
-  return withForegroundColor(rgb, function (solid) {
-    captured = solid;
-  }).then(function () {
-    return captured;
-  });
-}
 
 /** `createTextLayer`'s `position` is the bottom-left of the text box. */
 function textPosition(doc, params) {
@@ -697,6 +660,7 @@ function firstLine(text) {
 }
 
 module.exports = {
+  list_fonts: listFonts,
   create_text_layer: createTextLayer,
   get_text_layer: getTextLayer,
   update_text_layer: updateTextLayer,
@@ -704,6 +668,5 @@ module.exports = {
   set_text_style: setTextStyle,
   set_text_font_size: setTextFontSize,
   set_text_color: setTextColor,
-  normalizeColor: normalizeColor,
   currentColor: currentColor,
 };

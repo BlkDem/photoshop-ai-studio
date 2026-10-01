@@ -150,6 +150,22 @@ export class UxpRemoteAdapter implements PhotoshopAdapter {
     return (await this.send('set_layer_fill_opacity', params)) as ResultOf<'set_layer_fill_opacity'>;
   }
 
+  async setLayerLocking(params: ParamsOf<'set_layer_locking'>): Promise<ResultOf<'set_layer_locking'>> {
+    return (await this.send('set_layer_locking', params)) as ResultOf<'set_layer_locking'>;
+  }
+
+  async createFilledLayer(params: ParamsOf<'create_filled_layer'>): Promise<ResultOf<'create_filled_layer'>> {
+    return (await this.send('create_filled_layer', params)) as ResultOf<'create_filled_layer'>;
+  }
+
+  async modifySelection(params: ParamsOf<'modify_selection'>): Promise<ResultOf<'modify_selection'>> {
+    return (await this.send('modify_selection', params)) as ResultOf<'modify_selection'>;
+  }
+
+  async listFonts(params: ParamsOf<'list_fonts'>): Promise<ResultOf<'list_fonts'>> {
+    return (await this.send('list_fonts', params)) as ResultOf<'list_fonts'>;
+  }
+
   async setTextStyle(params: ParamsOf<'set_text_style'>): Promise<ResultOf<'set_text_style'>> {
     return (await this.send('set_text_style', params)) as ResultOf<'set_text_style'>;
   }

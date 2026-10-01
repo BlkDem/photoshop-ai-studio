@@ -250,7 +250,7 @@ export const ExpectationSchema = z.discriminatedUnion('kind', [
       'name', 'width', 'height', 'resolution', 'colorMode', 'layerCount', 'path', 'saved',
       // Derived from the selection in the snapshot, so `set_selection` has
       // something mechanical to be checked against.
-      'selectionWidth', 'selectionHeight',
+      'selectionWidth', 'selectionHeight', 'selectionActive',
     ]),
     equals: z.union([z.string(), z.number(), z.boolean(), z.null()]),
     tolerance: z.number().nonnegative().default(0),

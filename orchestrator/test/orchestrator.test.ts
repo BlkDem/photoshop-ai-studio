@@ -459,12 +459,13 @@ const NOT_DERIVABLE: Record<string, string> = {
   trim_document: 'the canvas ends up as small as the artwork allows',
   merge_visible_layers: 'the layer count drops by an unknown amount, depending on grouping',
   close_document: 'the check would be that the document is gone, which no property can express',
+  set_layer_locking: 'setLocking is accepted but no flag is readable back: layer.locked stays false either way',
 };
 
 /** Read-only tools: there is no post-condition because nothing changed. */
 const READ_ONLY = new Set([
   'get_document', 'get_document_info', 'get_layers', 'get_layer', 'get_text_layer', 'get_documents',
-  'get_capabilities', 'render_preview', 'sample_color',
+  'get_capabilities', 'render_preview', 'sample_color', 'list_fonts',
 ]);
 
 describe('every mutating tool has a mechanical post-condition', () => {
@@ -511,6 +512,8 @@ describe('every mutating tool has a mechanical post-condition', () => {
     resize_layer: { layerName: 'Logo', width: 200 },
     resize_canvas: { width: 800, height: 600 },
     crop_document: { left: 0, top: 0, right: 400, bottom: 300 },
+    modify_selection: { action: 'grow', amount: 4 },
+    create_filled_layer: { name: 'Wash', color: { r: 20, g: 20, b: 20 } },
   };
 
   it('derives something checkable for each of them', () => {
@@ -553,6 +556,15 @@ describe('every mutating tool has a mechanical post-condition', () => {
     } as never);
     expect(expectations.map((e) => e.kind)).toEqual(['layer_exists', 'layer_property']);
     expect(expectations[1]).toMatchObject({ property: 'withinCanvas', equals: true });
+  });
+
+  it('checks that a selection survived, without inventing its size', () => {
+    for (const action of ['grow', 'shrink', 'expand', 'smooth', 'border', 'invert', 'selectAll'] as const) {
+      expect(deriveExpectations('modify_selection', { action, amount: 4 } as never)).toEqual([
+        { kind: 'document_property', property: 'selectionActive', equals: true, tolerance: 0 },
+      ]);
+    }
+    expect(deriveExpectations('modify_selection', { action: 'deselect' } as never)[0]).toMatchObject({ equals: false });
   });
 
   it('gives the three content-dependent tools no invented check', () => {

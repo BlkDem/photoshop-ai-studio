@@ -389,6 +389,85 @@ function placement(name) {
   return name;
 }
 
+
+/**
+ * `set_layer_locking` — lock a layer against accidental edits.
+ *
+ * The DOM takes a flags object rather than a mode, so the mode is translated here.
+ * Which flags exist is a host detail: 26.11 accepts all three but only reports
+ * `locked` back, which is why the derived expectation only covers `all` and `none`.
+ */
+function setLayerLocking(ctx) {
+  var doc = ps.resolveDocument(ctx.params.documentId);
+  var layer = ps.findLayer(doc, ctx.params);
+  var lock = ctx.params.lock;
+  ps.assertMutable(layer);
+
+  if (!layer || typeof layer.setLocking !== 'function') {
+    throw StudioError('UNSUPPORTED_OPERATION', 'This Photoshop build cannot lock layers.', { recoverable: false });
+  }
+
+  // Every call sets every flag, so `none` means "all false" and `all` means
+  // "all true" rather than only touching the one asked about: a later `position`
+  // lock must not silently release an existing `all` lock.
+  var flags = {
+    all: lock === 'all',
+    position: lock === 'all' || lock === 'position',
+    transparency: lock === 'all' || lock === 'transparency',
+  };
+
+  try {
+    layer.setLocking(flags);
+  } catch (err) {
+    throw StudioError('STEP_FAILED', 'Photoshop would not change the locking on "' + layer.name + '": ' + ((err && err.message) || String(err)), {
+      recoverable: true,
+    });
+  }
+
+  // `layer.locked` does not follow `setLocking` on this build: Photoshop accepts
+  // the flags and keeps reporting `false`. That is a gap in what the host will
+  // tell us, not proof the lock failed, so it is reported rather than turned into
+  // an error — refusing here would make the tool unusable for a working feature.
+  // It is also why this tool has no derived expectation: there is nothing to check
+  // the request against.
+  var info = describe(doc, layer);
+  info.locking = { all: flags.all, position: flags.position, transparency: flags.transparency };
+  info.lockReported = layer.locked === true;
+  return info;
+}
+
+/**
+ * `create_filled_layer` — a new pixel layer filled with one colour.
+ *
+ * Goes through `createPixelLayer` rather than creating an empty layer and filling
+ * it: `createLayer` plus a fill leaves a moment where the layer exists and is
+ * empty, which is visible if anything looks at the document in between.
+ */
+function createFilledLayer(ctx) {
+  var doc = ps.resolveDocument(ctx.params.documentId);
+  var params = ctx.params;
+
+  return ps.solidColor(doc, params.color)
+    .then(function (solid) {
+      var created;
+      try {
+        created = doc.createPixelLayer({ name: params.name, fill: solid });
+      } catch (err) {
+        throw StudioError('UNSUPPORTED_OPERATION', 'This Photoshop build cannot create a filled pixel layer.', {
+          details: { cause: (err && err.message) || String(err) },
+        });
+      }
+      return ps.resolveCreatedLayer(doc, created);
+    })
+    .then(function (layer) {
+      ps.assertMutable(layer);
+      return layer;
+    })
+    .then(function (layer) {
+      return describe(doc, layer);
+    });
+}
+
 module.exports = {
   get_layers: getLayers,
   get_layer: getLayer,
@@ -400,6 +479,8 @@ module.exports = {
   set_layer_opacity: setLayerOpacity,
   set_layer_blend_mode: setLayerBlendMode,
   set_layer_fill_opacity: setLayerFillOpacity,
+  set_layer_locking: setLayerLocking,
+  create_filled_layer: createFilledLayer,
   mapBlendMode: mapBlendMode,
   withActiveLayer: withActiveLayer,
   create_group: createGroup,

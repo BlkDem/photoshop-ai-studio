@@ -9,6 +9,22 @@ import * as z from 'zod/v4';
  */
 
 /** 8-bit sRGB triple, the representation Photoshop uses for text colour. */
+/**
+ * One installed font, as the host reports it.
+ *
+ * `postScriptName` is the value to hand to a text layer, and the only one that
+ * identifies a face unambiguously — a family has a Regular, a Bold and an Italic
+ * and they are different fonts with the same `family`.
+ */
+export const FontInfoSchema = z.object({
+  name: z.string(),
+  family: z.string(),
+  style: z.string(),
+  postScriptName: z.string(),
+});
+
+export type FontInfo = z.infer<typeof FontInfoSchema>;
+
 export const RgbColorSchema = z.object({
   r: z.number().int().min(0).max(255),
   g: z.number().int().min(0).max(255),

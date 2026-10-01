@@ -66,6 +66,13 @@ export const DocumentStateSchema = DocumentInfoSchema.extend({
    * sets one and then acts on the document should be able to say what was
    * selected, and verification needs something to check `set_selection` against.
    */
+  /**
+   * Whether anything is selected, independent of how much.
+   *
+   * Separate from `selection` because deselecting is a real outcome with nothing
+   * to read back, and "the selection is absent" is the fact to verify.
+   */
+  selectionActive: z.boolean().optional(),
   selection: z
     .object({
       x: z.number(),

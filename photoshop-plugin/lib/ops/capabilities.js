@@ -69,6 +69,10 @@ var VERIFIED = [
   'layer.flip',
   'layer.rotate',
   'document.sample_color',
+  'selection.refine',
+  'layer.filled',
+  'layer.lock',
+  'text.list_fonts',
 ];
 
 /**
@@ -91,6 +95,7 @@ var NOT_ON_DOM = {
   'text.leading': 'Not exposed on the DOM, though `paragraphStyle.leading` may be.',
   'text.underline': 'Constants.Underline has no plain "on" here, only the vertical-text variants.',
   'text.strikethrough': 'characterStyle.strikeThrough takes a Constants.StrikeThrough enum, separate from Underline; the two are not interchangeable.',
+  'layer.lock_readback': 'setLocking is accepted, but no flag can be read back: layer.locked stays false whatever is requested, and lockedTransparency / lockedPosition are not on the DOM.',
 };
 
 /**
@@ -100,10 +105,7 @@ var NOT_ON_DOM = {
  * assumed, and each note records the failure that made it clear.
  */
 var UNSUPPORTED = {
-  'document.new': 'Works.',
   'document.crop': 'Every form of the `crop` descriptor is refused; ExtendScript performs the same crop through COM.',
-
-  'document.new': 'Not implemented yet. `app.documents.add` is present.',
   'layer.transform_descriptor': 'Every form of the `transform` descriptor is a no-op; the DOM methods work instead, on the active layer only.',
   'text.style_descriptor': '`textStyleRange`/`set` aimed at `_ref: \'textLayer\'` opens a modal dialog; `TextItem.characterStyle` works.',
   'color.solid_color': 'There is no factory: `app.solidColor` is absent and `new app.SolidColor(x)` ignores its argument.',
@@ -263,6 +265,15 @@ function readApiSurface() {
     'selection.smooth': probe(doc.selection, 'smooth'),
     'selection.select_border': probe(doc.selection, 'selectBorder'),
     'selection.solid': probe(doc.selection, 'solid'),
+    'selection.select_all': probe(doc.selection, 'selectAll'),
+    'selection.deselect': probe(doc.selection, 'deselect'),
+    'selection.inverse': probe(doc.selection, 'inverse'),
+
+    // --- locking: the flags are separate from the single `layer.locked` ------
+    'layer.set_locking': probe(layer, 'setLocking'),
+    'layer.locked_transparency': probe(layer, 'lockedTransparency'),
+    'layer.locked_position': probe(layer, 'lockedPosition'),
+    'layer.locked_all': probe(layer, 'locked'),
 
     // --- text, likewise ---
     'text.convert_to_shape': probe(layer, 'textItem.convertToShape'),
@@ -276,6 +287,11 @@ function readApiSurface() {
     'color.foreground': probe(app, 'foregroundColor'),
     'color.profiles': probe(app, 'getColorProfiles'),
     'app.fonts': probe(app, 'fonts'),
+    'document.pixel_layer': probe(doc, 'createPixelLayer'),
+    'document.reveal_all': probe(doc, 'revealAll'),
+    'document.suspend_history': probe(doc, 'suspendHistory'),
+    'layer.apply_image': probe(layer, 'applyImage'),
+    'layer.duplicate_dom': probe(layer, 'duplicate'),
     'app.preferences': probe(app, 'preferences'),
     'app.convert_units': probe(app, 'convertUnits'),
     'app.color_sampler': probe(app, 'ColorSampler'),
@@ -318,7 +334,87 @@ function getCapabilities() {
     uxpVersion: uxp.versions ? String(uxp.versions.uxp) : 'unknown',
     capabilities: capabilities,
     unsupported: unsupported,
+    samples: sampleShapes(),
   };
+}
+
+/**
+ * Real shapes, read from the live host.
+ *
+ * The property names of a `Font` or of a layer's locking flags are not in any
+ * document this project can consult, and guessing them produces code that reads
+ * `undefined` and reports success. Naming the keys the host actually exposes
+ * turns "I think it is `postScriptName`" into a fact that can be checked.
+ */
+function sampleShapes() {
+  var out = {};
+  // Each of these is tried in turn: a reference that throws is the expected way to
+  // find out, and guessing which one a build exposes is how the wrong one gets
+  // baked in.
+  function host(name) {
+    try {
+      if (photoshop[name]) return photoshop[name];
+    } catch (err) {
+      /* not exposed under this name on this build */
+    }
+    try {
+      return require('uxp')[name];
+    } catch (err) {
+      return null;
+    }
+  }
+
+  try {
+    var app = host('app');
+    var fonts = app && app.fonts;
+    if (fonts && fonts.length) {
+      out.fonts = {
+        count: fonts.length,
+        keys: Object.keys(fonts[0]),
+        first: {
+          name: fonts[0].name,
+          family: fonts[0].family,
+          style: fonts[0].style,
+          postScriptName: fonts[0].postScriptName,
+        },
+      };
+    } else {
+      out.fonts = { count: 0 };
+    }
+  } catch (err) {
+    out.fonts = { error: (err && err.message) || String(err) };
+  }
+
+  try {
+    var app2 = host('app');
+    var doc = app2 && app2.activeDocument;
+    var layer = doc && doc.layers && doc.layers.length ? doc.layers[0] : null;
+    if (layer) {
+      out.layer = {
+        lockKeys: Object.keys(layer).filter(function (key) { return /lock/i.test(key); }),
+        locked: layer.locked,
+        lockedTransparency: layer.lockedTransparency,
+        lockedPosition: layer.lockedPosition,
+      };
+    }
+  } catch (err) {
+    out.layer = { error: (err && err.message) || String(err) };
+  }
+
+  try {
+    var app3 = host('app');
+    var selection = app3 && app3.activeDocument && app3.activeDocument.selection;
+    out.selection = {
+      keys: selection ? Object.keys(selection) : [],
+      methods: selection
+        ? Object.keys(selection).filter(function (key) { return typeof selection[key] === 'function'; })
+        : [],
+    };
+  } catch (err) {
+    out.selection = { error: (err && err.message) || String(err) };
+  }
+
+  return out;
 }
 
 module.exports = { get_capabilities: getCapabilities };

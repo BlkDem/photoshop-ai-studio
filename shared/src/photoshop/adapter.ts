@@ -1,9 +1,10 @@
 import * as z from 'zod/v4';
 
 import type { DocumentInfo, DocumentRef, DocumentState, SaveResult } from './document.js';
-import type { DocumentListResult } from './operations.js';import type { LayerInfo, LayerSelector, LayerPosition } from './layer.js';
+import type { DocumentListResult } from './operations.js';
+import type { LayerInfo, LayerSelector, LayerPosition } from './layer.js';
 import type { CapabilitiesResult, ExportResult, ExportFormat, ParamsOf, PreviewResult, SampleColorResult } from './operations.js';
-import type { RgbColor, TextAlign, TextLayerInfo } from './text.js';
+import type { FontInfo, RgbColor, TextAlign, TextLayerInfo } from './text.js';
 /**
  * The Photoshop abstraction layer (brief §12).
  *
@@ -49,6 +50,10 @@ export interface PhotoshopAdapter {
   setLayerBlendMode(params: ParamsOf<'set_layer_blend_mode'>): Promise<LayerInfo>;
   /** Fill opacity, which fades content without touching effects. */
   setLayerFillOpacity(params: ParamsOf<'set_layer_fill_opacity'>): Promise<LayerInfo>;
+  setLayerLocking(params: ParamsOf<'set_layer_locking'>): Promise<LayerInfo>;
+  createFilledLayer(params: ParamsOf<'create_filled_layer'>): Promise<LayerInfo>;
+  modifySelection(params: ParamsOf<'modify_selection'>): Promise<DocumentState>;
+  listFonts(params: ParamsOf<'list_fonts'>): Promise<{ total: number; truncated: boolean; fonts: FontInfo[] }>;
   /*
    * DOM-backed operations added after the capability report was rebuilt from the
    * real `Layer` / `Document` surface rather than from the API reference: the

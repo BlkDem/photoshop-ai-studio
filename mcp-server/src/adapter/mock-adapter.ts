@@ -16,6 +16,7 @@ import {
   type DocumentRef,
   type DocumentState,
   type ExportResult,
+  type FontInfo,
   type LayerInfo,
   type LayerSelector,
   type ParamsOf,
@@ -254,6 +255,95 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
 
     this.lastLatencyMs = 0;
     return { ...this.toInfo(doc), layers: doc.layers.map((l) => ({ ...l })) };
+  }
+
+  /**
+   * The mock's selection is a box, so refinement is arithmetic on that box rather
+   * than real marching ants. `shrink` stops at zero rather than going negative, and
+   * `invert` swaps the box for the canvas, which is enough for the pipeline to
+   * exercise `selectionActive` without pretending to model pixels.
+   */
+  async modifySelection(params: ParamsOf<'modify_selection'>): Promise<DocumentState> {
+    const doc = this.active();
+    const store = doc as unknown as { selection?: Record<string, unknown> | null };
+    const current = store.selection ?? null;
+    const amount = params.amount ?? 0;
+
+    if (params.action === 'deselect') {
+      store.selection = null;
+    } else if (params.action === 'selectAll') {
+      store.selection = { x: 0, y: 0, width: doc.width, height: doc.height, feather: 0 };
+    } else if (params.action === 'invert') {
+      store.selection = { x: 0, y: 0, width: doc.width, height: doc.height, feather: 0, inverted: true };
+    } else {
+      if (!current) {
+        throw new StudioException(
+          'INVALID_PARAMS',
+          `Selection "${params.action}" needs a selection to already exist. Call set_selection first.`,
+        );
+      }
+      const x = Number(current.x);
+      const y = Number(current.y);
+      const width = Number(current.width);
+      const height = Number(current.height);
+      if (params.action === 'grow' || params.action === 'expand') {
+        store.selection = { x: x - amount, y: y - amount, width: width + amount * 2, height: height + amount * 2, feather: 0 };
+      } else if (params.action === 'shrink') {
+        const inset = Math.min(amount, Math.floor(Math.min(width, height) / 2));
+        store.selection = { x: x + inset, y: y + inset, width: width - inset * 2, height: height - inset * 2, feather: 0 };
+      } else if (params.action === 'smooth') {
+        store.selection = { ...current, feather: 0, smoothed: amount };
+      } else {
+        store.selection = { ...current, borderWidth: amount };
+      }
+    }
+
+    this.lastLatencyMs = 0;
+    const selection = store.selection ?? null;
+    return {
+      ...this.toInfo(doc),
+      layers: doc.layers.map((l) => ({ ...l })),
+      selection,
+      selectionActive: selection !== null,
+    } as DocumentState;
+  }
+
+  async setLayerLocking(params: ParamsOf<'set_layer_locking'>): Promise<LayerInfo> {
+    const { layer } = this.resolveLayer(params);
+    // Locking a layer is not editing it: the point is to prevent editing.
+    if (params.lock === 'all') layer.isLocked = true;
+    else if (params.lock === 'none') layer.isLocked = false;
+    return { ...layer };
+  }
+
+  async createFilledLayer(params: ParamsOf<'create_filled_layer'>): Promise<LayerInfo> {
+    const doc = this.active();
+    // A pixel fill covers the canvas, matching what `createPixelLayer` does on the
+    // real host — a full-canvas layer Photoshop will not move.
+    return this.addLayer(doc, {
+      name: params.name,
+      type: 'pixel',
+      x: 0,
+      y: 0,
+      width: doc.width,
+      height: doc.height,
+      fill: params.color,
+    } as never);
+  }
+
+  async listFonts(params: ParamsOf<'list_fonts'>): Promise<{ total: number; truncated: boolean; fonts: FontInfo[] }> {
+    // Two faces of one family on purpose: it is the distinction a caller needs and
+    // the reason `postScriptName` is the field to pass on.
+    const fonts: FontInfo[] = [
+      { name: 'Test Sans', family: 'Test Sans', style: 'Regular', postScriptName: 'TestSans-Regular' },
+      { name: 'Test Sans Bold', family: 'Test Sans', style: 'Bold', postScriptName: 'TestSans-Bold' },
+      { name: 'Other Grotesk', family: 'Other Grotesk', style: 'Regular', postScriptName: 'OtherGrotesk-Regular' },
+    ];
+    const search = params.search?.toLowerCase();
+    const matched = search
+      ? fonts.filter((f) => `${f.name} ${f.family} ${f.postScriptName}`.toLowerCase().includes(search))
+      : fonts;
+    return { total: matched.length, truncated: matched.length > params.limit, fonts: matched.slice(0, params.limit) };
   }
 
   async setLayerBlendMode(params: ParamsOf<'set_layer_blend_mode'>): Promise<LayerInfo> {

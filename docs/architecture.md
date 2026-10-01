@@ -35,6 +35,7 @@ adapter touches Photoshop; only the plugin knows Adobe exists.
 11. [ADR-010 — A mock adapter, not a mock Photoshop](#adr-010--a-mock-adapter-not-a-mock-photoshop)
 12. [ADR-011 — Writing a value is not the same as applying it](#adr-011--writing-a-value-is-not-the-same-as-applying-it)
 13. [ADR-012 — The servers must be restarted, or the evidence lies](#adr-012--the-servers-must-be-restarted-or-the-evidence-lies)
+14. [ADR-013 — Four more from the DOM, and one that cannot be checked](#adr-013--four-more-from-the-dom-and-one-that-cannot-be-checked)
 12. [Tool surface: why there is no `execute_anything`](#tool-surface-why-there-is-no-execute_anything)
 13. [End-to-end walkthrough](#end-to-end-walkthrough)
 14. [Security model](#security-model)
@@ -383,6 +384,67 @@ the plugin source to keep it that way:
 Every capability the AI can reach is a named, schema-checked, expectation-checked
 operation. If the model needs something new, it is a new tool, reviewed like
 code.
+
+---
+
+## ADR-013 — Four more from the DOM, and one that cannot be checked
+
+With the platform boundary settled, the reachable surface was worked through one
+method at a time. Four tools came out of it, each confirmed against Photoshop
+26.11 before being called done:
+
+| Tool | What it does | Verified on the host |
+|---|---|---|
+| `list_fonts` | the installed fonts, with `postScriptName` | 562 faces; 12 under a `myriad` search |
+| `modify_selection` | grow, shrink, expand, smooth, border, invert, selectAll, deselect | each action; `deselect` reported as `selectionActive: false` and the state persisted |
+| `create_filled_layer` | a solid-colour layer | created, named, typed `pixel` |
+| `set_layer_locking` | lock a layer | flags accepted — but see below |
+
+`list_fonts` exists because a font name is checked at *render* time, not at edit
+time. A plan that guesses "Inter" produces a layer that looks right in the
+snapshot and wrong in the export. `postScriptName` is the field to pass on,
+because a family has a Regular, a Bold and an Italic and they are different fonts
+sharing one family name.
+
+`create_filled_layer` is the only way to fill a layer through this DOM — there is
+no per-layer fill — and `createPixelLayer` always produces a full-canvas layer,
+which Photoshop then refuses to move. So the tool offers no position: it is a
+wash or a background, and pretending otherwise would be a parameter that quietly
+does nothing.
+
+**`set_layer_locking` is the interesting one.** `setLocking` is accepted and the
+flags take effect, but nothing can read them back: `layer.locked` stays `false`
+whatever was requested, and `lockedTransparency` / `lockedPosition` are not on the
+DOM at all. So:
+
+- the tool reports `locking` (what was asked for) and `lockReported` (what came
+  back) side by side, rather than echoing one and hiding the other;
+- it has **no** derived expectation. A check against `isLocked` would fail every
+  time; one that echoed the request back would only prove the plugin sent it;
+- `get_capabilities` records the gap as `layer.lock_readback`, so a planner sees it
+  before relying on it.
+
+An earlier version turned the read-back mismatch into an error, which made a
+working feature unusable — the host not reporting a value is not evidence the
+operation failed.
+
+### How the shape of a host object was established
+
+Property names such as a font's `postScriptName` are in no document this project
+can consult, and guessing them produces code that reads `undefined` and reports
+success. `get_capabilities` now returns a `samples` block naming the keys the
+host actually has — which is how `Constants.StrikeThrough` was found to be a
+separate enum from `Constants.Underline`, and how `lockedTransparency` was found
+to be absent rather than merely misnamed.
+
+### The fixture the live sweeps depend on
+
+`data/probes.jsonl` is not self-contained: it expects a document with `Title`,
+`CTA`, `Logo` and `Background`, built by `scripts/make-demo-document.jsx`. Run
+against an accumulated document it fails with "layer not found" and reads exactly
+like a regression — five of twenty-eight probes failed that way before the cause
+turned out to be state, not code. Rebuild the fixture before a sweep, and treat
+"layer not found" in one of these files as a fixture question first.
 
 ---
 

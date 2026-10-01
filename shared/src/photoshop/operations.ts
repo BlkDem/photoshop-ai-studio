@@ -3,6 +3,8 @@ import * as z from 'zod/v4';
 import { DocumentInfoSchema, DocumentRefSchema, DocumentStateSchema, SaveResultSchema } from './document.js';
 import {
   AnchorSchema,
+  ColorInputSchema,
+  FontInfoSchema,
   PREVIEW_DEFAULT_MAX_WIDTH,
   PREVIEW_MAX_WIDTH,
   ResampleMethodSchema,
@@ -82,6 +84,13 @@ export const OPERATION_NAMES = [
   'export_png',
   'export_jpg',
   'save_psd',
+  // selection and locking, reachable through the DOM
+  'modify_selection',
+  'set_layer_locking',
+  // pixels
+  'create_filled_layer',
+  // text support
+  'list_fonts',
   // studio support
   'render_preview',
 ] as const;
@@ -163,6 +172,43 @@ export const CapabilitiesResultSchema = z.object({
   capabilities: z.record(z.string(), CapabilityEntrySchema),
   /** Capability ids that are present but known not to work on this build. */
   unsupported: z.array(z.string()),
+  /**
+   * The shape of a few live objects, read from this host.
+   *
+   * Property names such as a font's `postScriptName` or the keys a layer exposes
+   * for locking are in no document this project can consult. Naming the keys the
+   * host actually has turns "I think it is called `postScriptName`" into a fact
+   * that can be checked, instead of code that reads `undefined` and reports
+   * success.
+   */
+  samples: z
+    .object({
+      fonts: z
+        .object({
+          count: z.number().optional(),
+          keys: z.array(z.string()).optional(),
+          first: z.record(z.string(), z.unknown()).optional(),
+          error: z.string().optional(),
+        })
+        .optional(),
+      layer: z
+        .object({
+          lockKeys: z.array(z.string()).optional(),
+          locked: z.boolean().optional(),
+          lockedTransparency: z.boolean().optional(),
+          lockedPosition: z.boolean().optional(),
+          error: z.string().optional(),
+        })
+        .optional(),
+      selection: z
+        .object({
+          keys: z.array(z.string()).optional(),
+          methods: z.array(z.string()).optional(),
+          error: z.string().optional(),
+        })
+        .optional(),
+    })
+    .optional(),
 });
 
 export type CapabilityEntry = z.infer<typeof CapabilityEntrySchema>;
@@ -563,6 +609,90 @@ export const OPERATIONS = {
     params: LayerSelectorSchema.extend({ mode: BlendModeSchema }),
     result: LayerInfoSchema,
   },
+  list_fonts: {
+    tool: 'photoshop.list_fonts',
+    title: 'List Fonts',
+    description:
+      'List the fonts installed on this machine, optionally filtered by family or by a ' +
+      'substring. Non-destructive and it never touches the document. Call it before ' +
+      '`create_text_layer` or `set_text_style` when the exact PostScript name matters: ' +
+      'a font that is not installed fails at render time rather than at edit time.',
+    category: 'text',
+    destructive: false,
+    requiresConfirmation: false,
+    params: z.object({
+      /** Case-insensitive substring of the family or the font name. */
+      search: z.string().min(1).optional(),
+      /** Return only these families. */
+      family: z.string().min(1).optional(),
+      limit: z.number().int().positive().max(2000).default(200),
+    }),
+    result: z.object({
+      /** How many fonts matched before `limit` was applied. */
+      total: z.number(),
+      /** Whether `total` was cut short by `limit`. */
+      truncated: z.boolean(),
+      fonts: z.array(FontInfoSchema),
+    }),
+  },
+
+  set_layer_locking: {
+    tool: 'photoshop.set_layer_locking',
+    title: 'Set Layer Locking',
+    description:
+      'Lock a layer so it cannot be moved, painted on, or have its transparency edited. ' +
+      '`all` locks everything; `transparency` and `position` lock one aspect each; `none` ' +
+      'unlocks. Locking protects against accidental edits and is fully reversible with `none`.',
+    category: 'layer',
+    destructive: false,
+    requiresConfirmation: false,
+    params: LayerSelectorSchema.extend({
+      lock: z.enum(['all', 'transparency', 'position', 'none']),
+    }),
+    result: LayerInfoSchema,
+  },
+
+  modify_selection: {
+    tool: 'photoshop.modify_selection',
+    title: 'Modify Selection',
+    description:
+      'Change the existing selection rather than making a new one: grow it, shrink it, ' +
+      'expand it to include partially covered pixels, smooth it, turn it into a band, ' +
+      'invert it, select everything, or drop it. Needs a selection to already exist, ' +
+      'except for `invert`, `selectAll` and `deselect`.',
+    category: 'canvas',
+    destructive: false,
+    requiresConfirmation: false,
+    params: z.object({
+      action: z.enum(['grow', 'shrink', 'expand', 'smooth', 'border', 'invert', 'selectAll', 'deselect']),
+      /**
+       * Pixels, for `grow`, `shrink`, `expand`, `smooth` and the width of `border`.
+       * Not used by the rest.
+       */
+      amount: z.number().min(0).max(1000).optional(),
+    }),
+    result: DocumentStateSchema,
+  },
+
+  create_filled_layer: {
+    tool: 'photoshop.create_filled_layer',
+    title: 'Create Filled Layer',
+    description:
+      'Create a new pixel layer filled with a solid colour. Distinct from `create_layer`, ' +
+      'which asks Photoshop for an empty layer that the caller then fills. Use this for a ' +
+      'flat wash or a background. The layer always covers the whole canvas: this is the ' +
+      'only way to fill a layer through the DOM, since there is no per-layer fill, and ' +
+      'Photoshop refuses to move a full-canvas layer.',
+    category: 'layer',
+    destructive: false,
+    requiresConfirmation: false,
+    params: z.object({
+      name: z.string().min(1),
+      color: ColorInputSchema,
+    }),
+    result: LayerInfoSchema,
+  },
+
   set_layer_fill_opacity: {
     tool: 'photoshop.set_layer_fill_opacity',
     title: 'Set Layer Fill Opacity',

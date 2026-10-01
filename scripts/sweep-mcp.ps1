@@ -15,6 +15,13 @@ exactly like a broken tool.
 .PARAMETER Probes
 Path to a JSONL file of [tool, argsJson] pairs. Defaults to data/probes.jsonl.
 
+.NOTES
+These probe files are NOT self-contained. They expect an open document with layers
+named Title, CTA, Logo and Background, which scripts/make-demo-document.jsx builds.
+Against an accumulated document the failures look exactly like regressions —
+"layer not found" for a layer that simply was never created this time — so build
+the fixture first, or treat that message as a fixture question before a code one.
+
 .EXAMPLE
 powershell -File scripts/sweep-mcp.ps1
 #>

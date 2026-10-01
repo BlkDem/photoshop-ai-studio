@@ -71,6 +71,14 @@ export function deriveExpectations<K extends PhotoshopOpName>(
     case 'set_layer_fill_opacity':
       return [{ kind: 'layer_property', layer: sel(p), property: 'fillOpacity', equals: Number(p.opacity), tolerance: 0.6 }];
 
+    case 'create_filled_layer':
+      // A filled layer is a layer first and a colour second; the colour cannot be
+      // read back from the snapshot, but the layer's existence and kind can.
+      return [
+        { kind: 'layer_exists', layer: { layerName: String(p.name) }, where: 'document' },
+        { kind: 'layer_property', layer: { layerName: String(p.name) }, property: 'type', equals: 'pixel', tolerance: 0 },
+      ];
+
     case 'rasterize_layer':
       // The point of rasterizing is that the layer stops being live.
       return [{ kind: 'layer_property', layer: sel(p), property: 'type', equals: 'pixel', tolerance: 0 }];
@@ -144,6 +152,29 @@ export function deriveExpectations<K extends PhotoshopOpName>(
 
     case 'flatten_document':
       return [{ kind: 'layer_count', equals: 1 }];
+
+    // --- selection --------------------------------------------------------
+    case 'modify_selection': {
+      // Only "is there a selection" is derivable. The resulting *size* of a grown,
+      // smoothed or bordered selection depends on the artwork — a grow stops at the
+      // canvas edge and a contract stops at the last fully-covered pixel — so any
+      // expected number would be a guess dressed up as a check.
+      return [{ kind: 'document_property', property: 'selectionActive', equals: p.action !== 'deselect', tolerance: 0 }];
+    }
+
+    // --- locking ----------------------------------------------------------
+    /*
+     * `set_layer_locking` gets no derived check, and the reason is specific rather
+     * than convenient: `setLocking` is accepted on this build but no flag is
+     * readable afterwards. `layer.locked` stays `false` whether or not the request
+     * worked, and `lockedTransparency` / `lockedPosition` are not on the DOM at all.
+     * A check against `isLocked` would therefore fail every time and prove nothing;
+     * one that echoed the request back would only confirm the plugin sent it.
+     *
+     * Until a host reports the flags back, the tool reports `locking` (what was
+     * asked for) and `lockReported` (what came back) side by side, and the caller
+     * decides what to trust.
+     */
 
     // --- files -------------------------------------------------------------
     // Writing a file cannot be checked by looking at the document, and these

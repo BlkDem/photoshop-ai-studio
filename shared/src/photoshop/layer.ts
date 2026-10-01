@@ -105,6 +105,15 @@ export const LayerInfoSchema = z.object({
   fillOpacity: z.number().min(0).max(100).optional(),
   blendMode: ReportedBlendModeSchema.optional(),
   /**
+   * The locking flags that were requested, and what the host reported back.
+   *
+   * Two fields because they disagree on 26.11: `setLocking` is accepted while
+   * `layer.locked` stays `false`. Reporting only one of them would either claim a
+   * lock that cannot be observed or hide a request that was made.
+   */
+  locking: z.object({ all: z.boolean(), position: z.boolean(), transparency: z.boolean() }).optional(),
+  lockReported: z.boolean().optional(),
+  /**
    * Whether the layer still overlaps the canvas.
    *
    * Derived, and read by verification: a transform that pushed the content off
