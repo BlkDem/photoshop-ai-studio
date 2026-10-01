@@ -36,9 +36,23 @@ let mcpServer: Server;
 let client: McpClient;
 let events: { publish: (event: unknown) => void };
 
-/** Build a fresh orchestrator against the shared MCP server. */
+/**
+ * Build a fresh orchestrator against the shared MCP server.
+ *
+ * The model roles are pinned to the deterministic gateway rather than inherited
+ * from `loadConfig()`. `loadConfig` reads the developer's `.env`, so without this
+ * the suite silently ran against whatever provider that file names — these tests
+ * assert on exact plan steps and error codes, so a real planner turns them into
+ * a network test that fails for reasons unrelated to the code, and passes on a
+ * machine with no key configured at all.
+ */
 function makeOrchestrator(overrides: Partial<OrchestratorConfig> = {}): Orchestrator {
   const base = loadConfig();
+  const offline: OrchestratorConfig['roles'] = {
+    planner: { role: 'planner', provider: 'mock', model: 'deterministic', apiKey: undefined, baseUrl: undefined },
+    vision: { role: 'vision', provider: 'mock', model: 'deterministic', apiKey: undefined, baseUrl: undefined },
+    fast: { role: 'fast', provider: 'mock', model: 'deterministic', apiKey: undefined, baseUrl: undefined },
+  };
   const config: OrchestratorConfig = {
     ...base,
     mcpUrl,
@@ -46,6 +60,7 @@ function makeOrchestrator(overrides: Partial<OrchestratorConfig> = {}): Orchestr
     logLevel: 'error',
     logFile: null,
     maxRepairAttempts: 2,
+    roles: offline,
     ...overrides,
   };
   const logger = createLogger({ source: 'orchestrator', level: 'error', console: false });
