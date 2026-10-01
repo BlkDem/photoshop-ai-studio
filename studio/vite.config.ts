@@ -28,6 +28,12 @@ export default defineConfig(({ mode }) => {
     server: {
       port: studioPort,
       strictPort: false,
+      // Vite binds loopback only by default, which on this machine means the
+      // dev server is invisible from WSL — it reaches Windows over the vEthernet
+      // gateway, not over 127.0.0.1. Bound to all interfaces the same URL works
+      // from Windows and from WSL. The exposure is the host's own vEthernet
+      // adapter rather than the LAN, and Vite prints the URLs either way.
+      host: env.STUDIO_HOST || '0.0.0.0',
       proxy: {
         // No timeout: `/api/events` is a long-lived stream.
         '/api': { ...proxy(orchestratorPort), timeout: 0, proxyTimeout: 0 },
