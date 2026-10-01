@@ -752,7 +752,11 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
 
   async placeImage(params: ParamsOf<'place_image'>): Promise<LayerInfo> {
     const doc = this.active();
-    const path = this.options.workspace.resolvePath(params.path, { defaultDir: 'assets' });
+    // `resolveInput`, not `resolvePath` with a default dir: a planner writes
+    // `assets/logo.png` (workspace-relative) and joining that onto the assets
+    // directory again would look for `assets/assets/logo.png`. The UXP adapter
+    // resolves the same way, and the mock must not diverge from it.
+    const path = this.options.workspace.resolveInput(params.path, 'input.png', 'assets');
     Workspace.assertExtension(path, ['.png', '.jpg', '.jpeg', '.webp', '.psd', '.tif', '.tiff', '.gif'], 'place_image');
     if (!existsSync(path)) {
       throw new StudioException('FILE_NOT_FOUND', `Image not found inside the workspace: ${path}`);

@@ -1,7 +1,7 @@
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { request as httpRequest } from 'node:http';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -66,6 +66,10 @@ interface ToolResult {
   isError?: boolean;
   structuredContent?: { success?: boolean; data?: unknown; error?: { code: string; message: string; recoverable: boolean } };
 }
+
+/** A 1×1 PNG. Only its size header matters — the mock reads width/height, not pixels. */
+const TINY_PNG_BASE64 =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 
 async function call(name: string, args: Record<string, unknown> = {}): Promise<ToolResult> {
   return (await client.callTool({ name, arguments: args })) as ToolResult;
@@ -166,6 +170,24 @@ describe('tools/call — success', () => {
     expectOk(await call('photoshop.rename_layer', { layerName: 'Logo', name: 'Company Logo' }));
     const data = expectOk(await call('photoshop.get_layer', { layerName: 'Company Logo' })) as Record<string, unknown>;
     expect(data.name).toBe('Company Logo');
+  });
+
+  it('places an image from a workspace-relative path without doubling the directory', async () => {
+    // A planner writes `assets/logo.png`, and `assets` is also the default input
+    // directory. Resolving that path against the default dir as well produced
+    // `assets/assets/logo.png` — a file that does not exist, reported as
+    // FILE_NOT_FOUND against a path the caller never wrote. The mock and the UXP
+    // adapter must resolve input paths the same way, or the mock stops being a
+    // faithful stand-in for the real thing.
+    mkdirSync(join(workspaceDir, 'assets'), { recursive: true });
+    writeFileSync(join(workspaceDir, 'assets', 'logo.png'), Buffer.from(TINY_PNG_BASE64, 'base64'));
+
+    const data = expectOk(
+      await call('photoshop.place_image', { path: 'assets/logo.png', name: 'PlacedLogo' }),
+    ) as Record<string, unknown>;
+
+    expect(data.name).toBe('PlacedLogo');
+    expect((data as { width: number }).width).toBeGreaterThan(0);
   });
 
   it('supports the layer hierarchy', async () => {
