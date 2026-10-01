@@ -525,6 +525,16 @@ export class Orchestrator {
    * like an assistant: an ambiguous instruction must come back as a question.
    */
   private async clarify(userRequest: string, state: DocumentSnapshot | null, notes: readonly string[]): Promise<string> {
+    // The planner's own explanation leads, because it is the only part that
+    // says *why*. It used to be appended after a canned sentence that returned
+    // first, so it never survived: asking for a firework came back as "I could
+    // not turn that into a plan with the available tools" and "which layer
+    // should I change?" — which blames the tools for an impossible request,
+    // asks a question about layers when the request was not about layers, and
+    // discards the model's actual note that no drawing tool exists.
+    const reason = notes.map((n) => n.trim()).filter(Boolean);
+    if (reason.length > 0) return reason.join(' ');
+
     try {
       const { text } = await this.gateways.fast.analyze({
         userRequest,
@@ -536,11 +546,7 @@ export class Orchestrator {
       /* the deterministic gateway is the fallback, not an error path */
     }
     const layers = state?.layers.map((l) => `"${l.name}"`).join(', ') ?? 'none';
-    return [
-      `I could not turn "${userRequest}" into a plan with the available tools.`,
-      `Which layer should I change? Available layers: ${layers}.`,
-      ...notes,
-    ].join(' ');
+    return `I could not turn "${userRequest}" into a plan with the available tools. Which layer should I change? Available layers: ${layers}.`;
   }
 
   private chatLine(userRequest: string, plan: Plan): string {

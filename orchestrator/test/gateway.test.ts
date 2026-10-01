@@ -319,10 +319,10 @@ describe('OpenAI-compatible gateway over HTTP', () => {
   const logger = { warn: () => {} };
 
   /** Answers every chat completion with `payload`, and records what was sent. */
-  const stubFetch = (payload: unknown): { sent: () => any } => {
-    const calls: any[] = [];
-    vi.stubGlobal('fetch', async (_url: string, init: any) => {
-      calls.push(JSON.parse(init.body));
+  const stubFetch = (payload: unknown): { sent: () => Record<string, unknown> | undefined } => {
+    const calls: Record<string, unknown>[] = [];
+    vi.stubGlobal('fetch', async (_url: string, init?: RequestInit) => {
+      calls.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
       return new Response(JSON.stringify(payload), { status: 200, headers: { 'content-type': 'application/json' } });
     });
     return { sent: () => calls.at(-1) };

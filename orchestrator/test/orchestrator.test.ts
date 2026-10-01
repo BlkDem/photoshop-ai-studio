@@ -429,6 +429,40 @@ describe('history', () => {
     expect(record?.plan).toBeNull();
   });
 
+  it('surfaces the planner’s own reason instead of a canned refusal', async () => {
+    // A planner asked for something impossible ("сделай салют") answers with an
+    // empty plan *and* a note saying which tool is missing. That note used to be
+    // appended after a canned sentence that returned first, so it never
+    // survived: the user was told the tools could not turn it into a plan and
+    // asked which layer to change, when the real answer was that no drawing
+    // tool exists at all.
+    const orchestrator = makeOrchestrator();
+    // A gateway that declines with a reason, standing in for a model that
+    // recognises the request is impossible.
+    const declining = {
+      role: 'planner' as const,
+      provider: 'mock' as const,
+      model: 'deterministic',
+      plan: async () => ({
+        goal: 'fireworks',
+        steps: [],
+        notes: ['There is no tool in the Photoshop set for drawing vector shapes or generating new pixels.'],
+      }),
+      analyze: async () => ({ text: 'I could not turn that into a plan with the available tools.' }),
+      verify: async () => ({ passed: true, reason: 'n/a' }),
+    };
+    (orchestrator as unknown as { gateways: Record<string, unknown> }).gateways.planner = declining;
+
+    const { message, run } = await orchestrator.submit({ sessionId: 'test', message: 'сделай салют' });
+
+    expect(message).toContain('no tool');
+    // The canned text that blamed the tools and asked about layers must not
+    // displace the reason.
+    expect(message).not.toContain('Which layer');
+    expect(run.status).toBe('failed');
+    expect(run.error?.message).toContain('no tool');
+  });
+
   it('persists history to disk as JSONL', async () => {
     const orchestrator = makeOrchestrator();
     await run(orchestrator, 'hide Background');
