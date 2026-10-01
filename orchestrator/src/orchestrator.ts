@@ -14,7 +14,11 @@ import {
   type DocumentState,
   type ExecutedStep,
   type HistoryRecord,
+  type ModelProfile,
+  type ModelProfileInput,
+  type ModelProbe,
   type ModelRef,
+  type ModelRoleId,
   type Plan,
   type Run,
   type RunDetail,
@@ -35,7 +39,8 @@ import { executeStep } from './execution/executor.js';
 import { applyDecisions, evaluateSafety, skippedStepRecord } from './execution/safety.js';
 import { safeVerify } from './state/verification.js';
 import { HistoryStore } from './execution/history.js';
-import type { OrchestratorConfig } from './config.js';
+import type { ModelRoleConfig, OrchestratorConfig } from './config.js';
+import { ModelStore, registryPath } from './models/registry.js';
 
 /**
  * The Orchestrator (§13).
@@ -98,7 +103,13 @@ export class Orchestrator {
   private readonly publish: (event: StudioEvent) => void;
   private readonly history: HistoryStore;
   private readonly jev: JevRouter;
-  private readonly gateways: Record<'planner' | 'vision' | 'fast', ModelGateway>;
+  /**
+   * Rebuilt whenever the registry changes, so a model added through the Studio
+   * takes effect without a restart. Not readonly for that reason: the gateways
+   * are exactly as long-lived as the configuration behind them.
+   */
+  private gateways: Record<'planner' | 'vision' | 'fast', ModelGateway>;
+  private readonly models: ModelStore;
 
   private readonly runs = new Map<string, RunContext>();
   /** Serialises execution: two concurrent mutations in one document is a bug. */
@@ -111,11 +122,8 @@ export class Orchestrator {
     this.publish = deps.events.publish;
     this.history = new HistoryStore(deps.config.dataDir);
     this.jev = createJevRouter(deps.config, deps.logger);
-    this.gateways = {
-      planner: createGateway(deps.config.roles.planner, deps.config, deps.logger),
-      vision: createGateway(deps.config.roles.vision, deps.config, deps.logger),
-      fast: createGateway(deps.config.roles.fast, deps.config, deps.logger),
-    };
+    this.models = new ModelStore(registryPath(deps.config), deps.config.roles);
+    this.gateways = this.buildGateways();
     this.logger.info({
       event: 'connection',
       message: 'orchestrator ready',
@@ -123,6 +131,97 @@ export class Orchestrator {
         planner: `${this.gateways.planner.provider}/${this.gateways.planner.model}`,
         jev: this.jev.mode,
         maxRepairAttempts: this.config.maxRepairAttempts,
+      },
+    });
+  }
+
+  // --- model registry ------------------------------------------------------
+
+  /**
+   * Resolves the three roles through the registry.
+   *
+   * A role with no profile falls back to the offline deterministic engine rather
+   * than to whatever `.env` happened to say: the registry is what the Studio
+   * edits, so once it exists it is the only truth, and silently reverting to the
+   * environment would make a removed model come back.
+   */
+  private buildGateways(): Record<'planner' | 'vision' | 'fast', ModelGateway> {
+    const role = (id: ModelRoleId): ModelRoleConfig =>
+      this.models.resolveRole(id) ?? {
+        role: id,
+        provider: 'mock',
+        model: 'deterministic',
+        apiKey: undefined,
+        baseUrl: undefined,
+      };
+    return {
+      planner: createGateway(role('planner'), this.config, this.logger),
+      vision: createGateway(role('vision'), this.config, this.logger),
+      fast: createGateway(role('fast'), this.config, this.logger),
+    };
+  }
+
+  listModels(): ReturnType<ModelStore['publicView']> {
+    return this.models.publicView();
+  }
+
+  addModel(input: ModelProfileInput): ModelProfile {
+    const profile = this.models.add(input);
+    this.afterRegistryChange(`added model "${profile.label}"`);
+    return profile;
+  }
+
+  updateModel(id: string, patch: Partial<ModelProfileInput>): ModelProfile {
+    const profile = this.models.update(id, patch);
+    this.afterRegistryChange(`updated model "${profile.label}"`);
+    return profile;
+  }
+
+  removeModel(id: string): void {
+    this.models.remove(id);
+    this.afterRegistryChange(`removed a model`);
+  }
+
+  assignModelRole(role: ModelRoleId, profileId: string | null): void {
+    this.models.assign(role, profileId);
+    this.afterRegistryChange(profileId === null ? `${role} → offline engine` : `assigned ${role}`);
+  }
+
+  /**
+   * Asks a configured model for a completion and reports what came back.
+   *
+   * A real call rather than a URL ping: several endpoints answer `/models`
+   * happily while rejecting the actual completion, and a probe that only proves
+   * the socket opens sends the operator to find that out mid-plan instead.
+   */
+  async probeModel(id: string): Promise<ModelProbe> {
+    const resolved = this.models.resolveProfile(id);
+    if (!resolved) throw new StudioException('MODEL_UNAVAILABLE', `No model profile with id "${id}"`, { recoverable: false });
+
+    const gateway = createGateway(resolved, this.config, this.logger);
+    const started = Date.now();
+    try {
+      const { text } = await gateway.analyze({
+        userRequest: 'Reply with the single word: ready',
+        state: null,
+        plan: null,
+        diffText: '',
+      } as never);
+      return { ok: typeof text === 'string' && text.length > 0, detail: String(text).slice(0, 200), latencyMs: Date.now() - started };
+    } catch (err) {
+      return { ok: false, detail: (err as Error).message.slice(0, 300), latencyMs: Date.now() - started };
+    }
+  }
+
+  private afterRegistryChange(message: string): void {
+    this.gateways = this.buildGateways();
+    this.logger.info({
+      event: 'models.changed',
+      message,
+      data: {
+        planner: `${this.gateways.planner.provider}/${this.gateways.planner.model}`,
+        vision: `${this.gateways.vision.provider}/${this.gateways.vision.model}`,
+        fast: `${this.gateways.fast.provider}/${this.gateways.fast.model}`,
       },
     });
   }

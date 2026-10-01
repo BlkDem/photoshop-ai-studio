@@ -77,6 +77,76 @@ export const ModelRolesSchema = z.object({
 });
 export type ModelRoles = z.infer<typeof ModelRolesSchema>;
 
+// --- model registry ---------------------------------------------------------
+
+/**
+ * One configured LLM the Studio can route a role to.
+ *
+ * A profile rather than a bare provider/model pair, because the interesting
+ * differences are per-model: a reasoning model needs a larger token ceiling than
+ * a cheap one, and the same vendor id may be reached through a gateway. The
+ * browser is told `hasApiKey` and never the key — the Studio configures models,
+ * it does not hold their credentials.
+ */
+export const ModelProviderIdSchema = z.enum(['openai', 'openai-compatible', 'anthropic', 'mock']);
+export type ModelProviderId = z.infer<typeof ModelProviderIdSchema>;
+
+export const ModelProfileSchema = z.object({
+  id: z.string(),
+  label: z.string().min(1),
+  provider: ModelProviderIdSchema,
+  model: z.string().min(1),
+  baseUrl: z.string().nullable(),
+  /** Present but never serialised: the browser must not receive a credential. */
+  hasApiKey: z.boolean(),
+  maxTokens: z.number().int().positive().nullable(),
+  /** Where the profile came from, so a seeded one can be traced back to its variable. */
+  origin: z.enum(['env', 'studio']).default('studio'),
+});
+export type ModelProfile = z.infer<typeof ModelProfileSchema>;
+
+/** What the Studio POSTs when adding or editing a profile. */
+export const ModelProfileInputSchema = z.object({
+  id: z.string().optional(),
+  label: z.string().min(1),
+  provider: ModelProviderIdSchema,
+  model: z.string().min(1),
+  baseUrl: z.string().optional(),
+  apiKey: z.string().optional(),
+  maxTokens: z.number().int().positive().optional(),
+});
+export type ModelProfileInput = z.infer<typeof ModelProfileInputSchema>;
+
+export const MODEL_ROLES = ['planner', 'vision', 'fast'] as const;
+export type ModelRoleId = (typeof MODEL_ROLES)[number];
+
+export const ModelRegistrySchema = z.object({
+  profiles: z.array(ModelProfileSchema),
+  /** Role → profile id. A null role means the offline deterministic engine. */
+  roles: z.object({
+    planner: z.string().nullable(),
+    vision: z.string().nullable(),
+    fast: z.string().nullable(),
+  }),
+});
+export type ModelRegistry = z.infer<typeof ModelRegistrySchema>;
+
+export const AssignRoleRequestSchema = z.object({
+  role: z.enum(MODEL_ROLES),
+  /** null sends the role back to the built-in deterministic engine. */
+  profileId: z.string().nullable(),
+});
+export type AssignRoleRequest = z.infer<typeof AssignRoleRequestSchema>;
+
+/** Outcome of a connectivity check against a configured model. */
+export const ModelProbeSchema = z.object({
+  ok: z.boolean(),
+  /** Never contains a key. */
+  detail: z.string(),
+  latencyMs: z.number().int().nonnegative().nullable(),
+});
+export type ModelProbe = z.infer<typeof ModelProbeSchema>;
+
 export const StudioStateSchema = z.object({
   connection: AdapterConnectionSchema,
   snapshot: DocumentSnapshotSchema.nullable(),
