@@ -103,9 +103,17 @@ export type PhotoshopOpName = (typeof OPERATION_NAMES)[number];
 // ---------------------------------------------------------------------------
 
 /** Identifies which open document an operation targets. */
+/**
+ * Photoshop reports document and layer ids as numbers, so a model that reads
+ * one out of the state it was shown will write one back. The wire type is a
+ * string, and rejecting the copy outright fails the whole plan over a value that
+ * identifies exactly one document, so it is normalised here instead.
+ */
+const IdSchema = z.union([z.string().min(1), z.number().int()]).transform((v) => String(v));
+
 export const DocumentTargetSchema = z.object({
   /** Omit or pass `"active"` to target the document the user is looking at. */
-  documentId: z.string().min(1).default('active'),
+  documentId: IdSchema.default('active'),
 });
 
 export type DocumentTarget = z.infer<typeof DocumentTargetSchema>;

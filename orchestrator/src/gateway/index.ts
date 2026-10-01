@@ -22,6 +22,8 @@ const DEFAULT_BASE_URLS: Record<string, string> = {
 export function createGateway(roleConfig: ModelRoleConfig, config: OrchestratorConfig, logger: Logger): ModelGateway {
   const timeoutMs = envInt('MODEL_TIMEOUT_MS', 60_000);
   const baseUrl = roleConfig.baseUrl ?? DEFAULT_BASE_URLS[roleConfig.provider] ?? '';
+  // A profile's own ceiling wins: it was set because that model needs it.
+  const maxTokens = roleConfig.maxTokens ?? config.maxTokens;
 
   switch (roleConfig.provider) {
     case 'mock':
@@ -36,6 +38,7 @@ export function createGateway(roleConfig: ModelRoleConfig, config: OrchestratorC
         baseUrl,
         temperature: config.temperature,
         timeoutMs,
+        maxTokens,
         logger,
       });
 
@@ -47,6 +50,7 @@ export function createGateway(roleConfig: ModelRoleConfig, config: OrchestratorC
         baseUrl,
         temperature: config.temperature,
         timeoutMs,
+        maxTokens,
       });
 
     default:

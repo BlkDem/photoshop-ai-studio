@@ -20,6 +20,13 @@ export interface ModelRoleConfig {
   model: string;
   apiKey: string | undefined;
   baseUrl: string | undefined;
+  /**
+   * Per-model token ceiling. Reasoning models spend most of their budget before
+   * emitting JSON, so this is a property of the model rather than of the
+   * deployment — Space Bunny Alpha needs roughly 6k where a cheap one needs 1k.
+   * Falls back to `OrchestratorConfig.maxTokens`.
+   */
+  maxTokens?: number;
 }
 
 export interface OrchestratorConfig {
@@ -34,6 +41,14 @@ export interface OrchestratorConfig {
 
   roles: Record<ModelRole, ModelRoleConfig>;
   temperature: number;
+  /**
+   * Token budget per completion.
+   *
+   * Reasoning models spend most of this before emitting JSON — Space Bunny
+   * Alpha needs roughly 6k — so a small ceiling does not produce a short answer
+   * but an empty one.
+   */
+  maxTokens: number;
   maxPlanSteps: number;
   maxRepairAttempts: number;
 
@@ -87,6 +102,7 @@ export function loadConfig(): OrchestratorConfig {
       fast: loadRole('fast', 'gpt-4.1-mini'),
     },
     temperature: Number.parseFloat(env('AI_TEMPERATURE', '0.1')) || 0.1,
+    maxTokens: envInt('AI_MAX_TOKENS', 8192),
     maxPlanSteps: envInt('AI_MAX_PLAN_STEPS', 24),
     maxRepairAttempts: envInt('AI_MAX_REPAIR_ATTEMPTS', 2),
     jevRuntimeUrl: envOptional('JEV_RUNTIME_URL'),

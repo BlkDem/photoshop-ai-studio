@@ -29,6 +29,7 @@ export interface OpenAiCompatibleConfig {
   baseUrl: string;
   temperature: number;
   timeoutMs: number;
+  maxTokens: number;
   logger: { warn(input: { event: string; message: string; data?: unknown }): void };
 }
 
@@ -76,6 +77,12 @@ export class OpenAiCompatibleGateway implements ModelGateway {
           temperature: this.config.role === 'planner' ? this.config.temperature : 0,
           messages,
           response_format: { type: 'json_object' },
+          // Sent explicitly because leaving it to the provider is what breaks
+          // reasoning models. Space Bunny Alpha spends ~19k characters reasoning
+          // before it emits a token of JSON; with the provider default it hit
+          // `finish_reason: length` and returned `content: null`, which surfaced
+          // as "Model returned an empty completion" and a dead PLAN_INVALID run.
+          max_tokens: this.config.maxTokens,
         }),
         signal: AbortSignal.timeout(this.config.timeoutMs),
       });
@@ -98,11 +105,27 @@ export class OpenAiCompatibleGateway implements ModelGateway {
     }
 
     const payload = (await response.json()) as {
-      choices?: { message?: { content?: string } }[];
+      choices?: { finish_reason?: string | null; message?: { content?: string; reasoning?: string } }[];
     };
-    const content = payload.choices?.[0]?.message?.content;
+    const choice = payload.choices?.[0];
+    const content = choice?.message?.content;
     if (typeof content !== 'string' || content.trim() === '') {
-      throw new ModelUnavailableError('Model returned an empty completion', this.provider, this.config.model);
+      // A truncated completion and an empty one need different advice: the first
+      // is fixed by raising AI_MAX_TOKENS, the second by fixing the model.
+      if (choice?.finish_reason === 'length') {
+        const reasoned = typeof choice?.message?.reasoning === 'string' ? choice.message.reasoning.length : 0;
+        throw new ModelUnavailableError(
+          `Model used its whole ${this.config.maxTokens}-token budget reasoning without emitting JSON` +
+            `${reasoned ? ` (${reasoned} characters of reasoning)` : ''}. Raise AI_MAX_TOKENS.`,
+          this.provider,
+          this.config.model,
+        );
+      }
+      throw new ModelUnavailableError(
+        `Model returned an empty completion (finish_reason: ${choice?.finish_reason ?? 'unknown'})`,
+        this.provider,
+        this.config.model,
+      );
     }
     return content;
   }
@@ -259,6 +282,8 @@ function renderParamShape(tool: string): string {
 type ZodDef = {
   type?: string;
   innerType?: unknown;
+  /** ZodPipe input side: what the caller must supply, before any transform. */
+  in?: unknown;
   shape?: Record<string, unknown>;
   values?: unknown[];
   entries?: unknown;
@@ -292,6 +317,12 @@ function describeParamType(schema: unknown): string {
   }
 
   switch (def.type) {
+    case 'pipe': {
+      // A transform is invisible to the model: it sends what the schema accepts
+      // and the transform runs afterwards. Render the input side, or the type
+      // comes out as `pipe` and tells the planner nothing.
+      return describeParamType(def.in);
+    }
     case 'object': {
       const shape = (def.shape ?? {}) as Record<string, unknown>;
       const inner = Object.entries(shape)
@@ -349,7 +380,10 @@ export function renderStateForPrompt(state: DocumentSnapshot | null): string {
   if (!state) return '(no document is currently open in Photoshop)';
   const doc = state.document;
   const lines = [
-    `document "${doc.name}" id=${doc.id} ${doc.width}×${doc.height} @${doc.resolution}ppi ${doc.colorMode}`,
+    // Quoted because `documentId` is a string in every tool schema. Rendering it
+    // bare taught the model to pass a number, and the plan died on
+    // INVALID_PARAMS for a value it had copied straight out of this line.
+    `document "${doc.name}" id="${doc.id}" ${doc.width}×${doc.height} @${doc.resolution}ppi ${doc.colorMode}`,
     `layers (bottom → top, ${state.layers.length}):`,
   ];
   const byId = new Map(state.layers.map((l) => [l.id, l]));

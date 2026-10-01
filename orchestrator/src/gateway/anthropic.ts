@@ -33,6 +33,7 @@ export interface AnthropicConfig {
   baseUrl: string;
   temperature: number;
   timeoutMs: number;
+  maxTokens: number;
 }
 
 export class AnthropicGateway implements ModelGateway {
@@ -67,7 +68,10 @@ export class AnthropicGateway implements ModelGateway {
         },
         body: JSON.stringify({
           model: this.config.model,
-          max_tokens: 2048,
+          // Was hard-coded to 2048, which is under what a full plan needs: the
+          // planner prompt carries 52 tool shapes, and a 24-step plan does not
+          // fit in 2k tokens.
+          max_tokens: this.config.maxTokens,
           temperature: this.config.role === 'planner' ? this.config.temperature : 0,
           system,
           messages: [{ role: 'user', content: user }],
