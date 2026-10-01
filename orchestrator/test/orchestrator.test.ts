@@ -513,7 +513,8 @@ describe('every mutating tool has a mechanical post-condition', () => {
     resize_canvas: { width: 800, height: 600 },
     crop_document: { left: 0, top: 0, right: 400, bottom: 300 },
     modify_selection: { action: 'grow', amount: 4 },
-    create_filled_layer: { name: 'Wash', color: { r: 20, g: 20, b: 20 } },
+    apply_image: { layerName: 'Logo', sourceName: 'mark.psd' },
+    duplicate_layers: { layerName: 'Logo', name: 'Logo copy' },
   };
 
   it('derives something checkable for each of them', () => {

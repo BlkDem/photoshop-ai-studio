@@ -62,6 +62,9 @@ describe('operation registry', () => {
     expect(destructive).toEqual(
       [
         'apply_filter',
+        // Composites another document's pixels *over* the layer's, replacing what
+        // was there — a filter adds to it, this does not.
+        'apply_image',
         'close_document',
         'convert_color_mode',
         'crop_document',

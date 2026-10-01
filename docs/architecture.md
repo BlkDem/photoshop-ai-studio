@@ -35,7 +35,7 @@ adapter touches Photoshop; only the plugin knows Adobe exists.
 11. [ADR-010 — A mock adapter, not a mock Photoshop](#adr-010--a-mock-adapter-not-a-mock-photoshop)
 12. [ADR-011 — Writing a value is not the same as applying it](#adr-011--writing-a-value-is-not-the-same-as-applying-it)
 13. [ADR-012 — The servers must be restarted, or the evidence lies](#adr-012--the-servers-must-be-restarted-or-the-evidence-lies)
-14. [ADR-013 — Four more from the DOM, and one that cannot be checked](#adr-013--four-more-from-the-dom-and-one-that-cannot-be-checked)
+14. [ADR-013 — Five more from the DOM, two of which could not be built](#adr-013--five-more-from-the-dom-two-of-which-could-not-be-built)
 12. [Tool surface: why there is no `execute_anything`](#tool-surface-why-there-is-no-execute_anything)
 13. [End-to-end walkthrough](#end-to-end-walkthrough)
 14. [Security model](#security-model)
@@ -387,17 +387,18 @@ code.
 
 ---
 
-## ADR-013 — Four more from the DOM, and one that cannot be checked
+## ADR-013 — Five more from the DOM, two of which could not be built
 
 With the platform boundary settled, the reachable surface was worked through one
-method at a time. Four tools came out of it, each confirmed against Photoshop
+method at a time. Five tools came out of it, each confirmed against Photoshop
 26.11 before being called done:
 
 | Tool | What it does | Verified on the host |
 |---|---|---|
 | `list_fonts` | the installed fonts, with `postScriptName` | 562 faces; 12 under a `myriad` search |
 | `modify_selection` | grow, shrink, expand, smooth, border, invert, selectAll, deselect | each action; `deselect` reported as `selectionActive: false` and the state persisted |
-| `create_filled_layer` | a solid-colour layer | created, named, typed `pixel` |
+| `duplicate_layers` | copy a layer, named and placed | copy made and renamed; `duplicate` returns the new layer |
+| `apply_image` | composite another open document onto a layer | exports before and after differ by MD5 — it really changes pixels |
 | `set_layer_locking` | lock a layer | flags accepted — but see below |
 
 `list_fonts` exists because a font name is checked at *render* time, not at edit
@@ -406,11 +407,26 @@ snapshot and wrong in the export. `postScriptName` is the field to pass on,
 because a family has a Regular, a Bold and an Italic and they are different fonts
 sharing one family name.
 
-`create_filled_layer` is the only way to fill a layer through this DOM — there is
-no per-layer fill — and `createPixelLayer` always produces a full-canvas layer,
-which Photoshop then refuses to move. So the tool offers no position: it is a
-wash or a background, and pretending otherwise would be a parameter that quietly
-does nothing.
+**A solid fill is not available, and the tool was removed rather than shipped.**
+It was implemented three ways before being taken out:
+
+1. `createPixelLayer({ fill })` — accepts the fill, ignores it, and returns a
+   correctly-named pixel layer of size 0×0.
+2. `selection.fill(solid)` — the method that would be the obvious answer. It does
+   not exist on 26.11.
+3. the `fill` descriptor through `batchPlay`, in both of its spellings. Both are
+   accepted and both leave the layer 0×0.
+
+The layer existed, was named, and reported `type: "pixel"` at every step. Only its
+bounds showed there was nothing in it. It is recorded as `layer.fill` in the
+capability report so nobody tries a fourth route.
+
+That is also what `withinCanvas` was built for, and it earned its place here: the
+derived expectation for this tool now checks it, so an empty layer fails
+verification instead of passing. `sample_color` refused to sample any point in
+those documents, which is what first surfaced the problem — its own error message
+now says so, because "Could not interpret the colour Photoshop returned" sent
+looking for a colour-parsing bug that did not exist.
 
 **`set_layer_locking` is the interesting one.** `setLocking` is accepted and the
 flags take effect, but nothing can read them back: `layer.locked` stays `false`

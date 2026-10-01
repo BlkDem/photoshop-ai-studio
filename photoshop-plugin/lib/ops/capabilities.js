@@ -70,9 +70,10 @@ var VERIFIED = [
   'layer.rotate',
   'document.sample_color',
   'selection.refine',
-  'layer.filled',
   'layer.lock',
   'text.list_fonts',
+  'layer.duplicate',
+  'layer.apply_image',
 ];
 
 /**
@@ -86,6 +87,7 @@ var VERIFIED = [
  */
 var NOT_ON_DOM = {
   'document.rename': 'Assignable on some builds; on 26.11 `Document.name` has only a getter.',
+  'document.name_new': 'A new document cannot be named on this build: `documents.add` ignores a name and `Document.name` has no setter. `duplicate_document` can, because `duplicate(name)` takes one.',
   'layer.mask': 'Not on the DOM; a mask has to be created with a `make` descriptor.',
   'layer.mask_remove': 'Not on the DOM.',
   'layer.smart_object': 'Not on the DOM; `convertToSmartObject` has to go through batchPlay.',
@@ -109,6 +111,7 @@ var UNSUPPORTED = {
   'layer.transform_descriptor': 'Every form of the `transform` descriptor is a no-op; the DOM methods work instead, on the active layer only.',
   'text.style_descriptor': '`textStyleRange`/`set` aimed at `_ref: \'textLayer\'` opens a modal dialog; `TextItem.characterStyle` works.',
   'color.solid_color': 'There is no factory: `app.solidColor` is absent and `new app.SolidColor(x)` ignores its argument.',
+  'layer.fill': 'Not achievable on this build. Three routes were tried: `createPixelLayer({fill})` accepts the fill and leaves the layer 0x0; `selection.fill` does not exist; and the `fill` descriptor via batchPlay leaves it 0x0 in both of its spellings. A filled layer is therefore not offered as a tool.',
 };
 
 /** Reads a dotted path off an object, returning `undefined` for anything missing. */
@@ -265,6 +268,9 @@ function readApiSurface() {
     'selection.smooth': probe(doc.selection, 'smooth'),
     'selection.select_border': probe(doc.selection, 'selectBorder'),
     'selection.solid': probe(doc.selection, 'solid'),
+    'selection.fill': probe(doc.selection, 'fill'),
+    'selection.select_all_probe': probe(doc.selection, 'selectAll'),
+    'document.create_pixel_layer_fill': probe(doc, 'createPixelLayer'),
     'selection.select_all': probe(doc.selection, 'selectAll'),
     'selection.deselect': probe(doc.selection, 'deselect'),
     'selection.inverse': probe(doc.selection, 'inverse'),

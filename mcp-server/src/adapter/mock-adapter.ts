@@ -316,19 +316,40 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
     return { ...layer };
   }
 
-  async createFilledLayer(params: ParamsOf<'create_filled_layer'>): Promise<LayerInfo> {
+  async duplicateLayers(params: ParamsOf<'duplicate_layers'>): Promise<LayerInfo> {
     const doc = this.active();
-    // A pixel fill covers the canvas, matching what `createPixelLayer` does on the
-    // real host — a full-canvas layer Photoshop will not move.
-    return this.addLayer(doc, {
-      name: params.name,
-      type: 'pixel',
-      x: 0,
-      y: 0,
-      width: doc.width,
-      height: doc.height,
-      fill: params.color,
-    } as never);
+    const { layer } = this.resolveLayer(params);
+    this.assertMutable(layer);
+    const copy = this.addLayer(doc, { ...layer, name: params.name ?? `${layer.name} copy` });
+    // The mock's stack is a plain array, so placement is a reorder rather than a
+    // DOM call. Top of the Photoshop stack is index 0.
+    if (params.placement === 'placeAtBeginning') {
+      const at = doc.layers.indexOf(copy);
+      if (at > -1) {
+        doc.layers.splice(at, 1);
+        doc.layers.push(copy);
+      }
+    }
+    return { ...copy };
+  }
+
+  async applyImage(params: ParamsOf<'apply_image'>): Promise<LayerInfo> {
+    const doc = this.active();
+    const { layer } = this.resolveLayer(params);
+    this.assertMutable(layer);
+    // The mock has no pixels; it records what was composited so a plan can be
+    // asserted on, exactly as `applyFilter` does.
+    const target = layer as unknown as Record<string, unknown>;
+    target.appliedImage = params.sourceName;
+    target.appliedImageOptions = {
+      offset: params.offset,
+      scale: params.scale,
+      blendMode: params.blendMode,
+      opacity: params.opacity,
+    };
+    if (params.blendMode) layer.blendMode = params.blendMode;
+    if (params.opacity !== undefined) layer.opacity = params.opacity;
+    return { ...layer };
   }
 
   async listFonts(params: ParamsOf<'list_fonts'>): Promise<{ total: number; truncated: boolean; fonts: FontInfo[] }> {

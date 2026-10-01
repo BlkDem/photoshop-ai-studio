@@ -260,7 +260,16 @@ function toRgb(solid) {
   if (solid && solid.rgb) {
     return { r: clamp(solid.rgb.red), g: clamp(solid.rgb.green), b: clamp(solid.rgb.blue) };
   }
-  throw StudioError('STEP_FAILED', 'Could not interpret the colour Photoshop returned.', { recoverable: true });
+  // Reached whenever Photoshop hands back nothing usable, which in practice means
+  // the point had no pixels in it: an empty layer, a transparent region, a document
+  // whose layers are all 0x0. "Could not interpret" describes this symptom, not the
+  // cause, and cost an hour of looking for a colour-parsing bug that was not there.
+  throw StudioError(
+    'STEP_FAILED',
+    'Photoshop returned no colour at that point. It is likely outside the canvas, or ' +
+      'covering a layer that has no pixels in it — an empty or 0\u00d70 layer samples nothing.',
+    { recoverable: true },
+  );
 }
 
 module.exports = {

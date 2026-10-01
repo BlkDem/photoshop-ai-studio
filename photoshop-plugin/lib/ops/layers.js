@@ -390,6 +390,93 @@ function placement(name) {
 }
 
 
+
+/**
+ * `duplicate_layers` — copy a layer, named and placed.
+ *
+ * The DOM's `duplicate` returns the new layer, which is what makes this checkable:
+ * a copy that appeared somewhere unexpected, or that Photoshop named differently,
+ * is visible in the result rather than inferred from a layer count.
+ */
+function duplicateLayers(ctx) {
+  var doc = ps.resolveDocument(ctx.params.documentId);
+  var layer = ps.findLayer(doc, ctx.params);
+  ps.assertMutable(layer);
+
+  var where = ctx.params.placement || 'placeAtEnd';
+  var copy;
+
+  try {
+    copy = layer.duplicate(undefined, placement(where));
+  } catch (err) {
+    throw StudioError('STEP_FAILED', 'Photoshop would not duplicate "' + layer.name + '": ' + ((err && err.message) || String(err)), {
+      recoverable: true,
+    });
+  }
+
+  return ps
+    .resolveCreatedLayer(doc, copy)
+    .then(function (created) {
+      if (!created) {
+        throw StudioError('STEP_FAILED', 'Photoshop reported a duplicate of "' + layer.name + '" but the copy could not be found.');
+      }
+      if (ctx.params.name && String(created.name) !== String(ctx.params.name)) {
+        try {
+          created.name = ctx.params.name;
+        } catch (err) {
+          throw StudioError('STEP_FAILED', 'The copy was made but could not be named "' + ctx.params.name + '": ' + ((err && err.message) || String(err)), {
+            recoverable: true,
+          });
+        }
+      }
+      return describe(doc, created);
+    });
+}
+
+/**
+ * `apply_image` — composite another open document's pixels onto a layer.
+ *
+ * Destructive in the way `apply_filter` is not: this *replaces* the layer's pixels
+ * rather than filtering them, which is why the registry asks for confirmation.
+ *
+ * `layer.applyImage(name, options)` takes a document **name**, not a reference, so
+ * the source has to be open and the name has to match exactly. Options are passed
+ * through only when asked for, since an empty object is not the same as none and
+ * this build's defaults are not documented.
+ */
+function applyImage(ctx) {
+  var doc = ps.resolveDocument(ctx.params.documentId);
+  var layer = ps.findLayer(doc, ctx.params);
+  ps.assertMutable(layer);
+
+  var sourceName = ctx.params.sourceName;
+  if (!ps.findDocumentByName(sourceName)) {
+    throw StudioError(
+      'INVALID_PARAMS',
+      'No open document named "' + sourceName + '". apply_image composites an already-open document; open it in Photoshop first.',
+      { details: { open: ps.openDocumentNames() } },
+    );
+  }
+
+  var options = {};
+  if (ctx.params.offset) options.offset = { x: ctx.params.offset.x, y: ctx.params.offset.y };
+  if (ctx.params.scale) options.scale = { x: ctx.params.scale.x, y: ctx.params.scale.y };
+  if (ctx.params.blendMode) options.blendMode = mapBlendMode(ctx.params.blendMode);
+  if (typeof ctx.params.opacity === 'number') options.opacity = ctx.params.opacity;
+
+  try {
+    layer.applyImage(sourceName, options);
+  } catch (err) {
+    throw StudioError(
+      'STEP_FAILED',
+      'Photoshop would not apply "' + sourceName + '" onto "' + layer.name + '": ' + ((err && err.message) || String(err)),
+      { recoverable: true },
+    );
+  }
+
+  return describe(doc, layer);
+}
+
 /**
  * `set_layer_locking` — lock a layer against accidental edits.
  *
@@ -436,38 +523,6 @@ function setLayerLocking(ctx) {
   return info;
 }
 
-/**
- * `create_filled_layer` — a new pixel layer filled with one colour.
- *
- * Goes through `createPixelLayer` rather than creating an empty layer and filling
- * it: `createLayer` plus a fill leaves a moment where the layer exists and is
- * empty, which is visible if anything looks at the document in between.
- */
-function createFilledLayer(ctx) {
-  var doc = ps.resolveDocument(ctx.params.documentId);
-  var params = ctx.params;
-
-  return ps.solidColor(doc, params.color)
-    .then(function (solid) {
-      var created;
-      try {
-        created = doc.createPixelLayer({ name: params.name, fill: solid });
-      } catch (err) {
-        throw StudioError('UNSUPPORTED_OPERATION', 'This Photoshop build cannot create a filled pixel layer.', {
-          details: { cause: (err && err.message) || String(err) },
-        });
-      }
-      return ps.resolveCreatedLayer(doc, created);
-    })
-    .then(function (layer) {
-      ps.assertMutable(layer);
-      return layer;
-    })
-    .then(function (layer) {
-      return describe(doc, layer);
-    });
-}
-
 module.exports = {
   get_layers: getLayers,
   get_layer: getLayer,
@@ -480,7 +535,8 @@ module.exports = {
   set_layer_blend_mode: setLayerBlendMode,
   set_layer_fill_opacity: setLayerFillOpacity,
   set_layer_locking: setLayerLocking,
-  create_filled_layer: createFilledLayer,
+  duplicate_layers: duplicateLayers,
+  apply_image: applyImage,
   mapBlendMode: mapBlendMode,
   withActiveLayer: withActiveLayer,
   create_group: createGroup,

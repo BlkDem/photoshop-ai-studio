@@ -175,6 +175,37 @@ function listDocumentIds() {
 }
 
 /**
+ * An open document by its exact name, or `null`.
+ *
+ * `applyImage` takes a document *name* rather than a reference, so resolving it
+ * here is what lets a wrong name fail with "these are the open ones" instead of a
+ * DOM error that says nothing about which document was meant.
+ */
+function findDocumentByName(name) {
+  try {
+    var docs = app.documents;
+    for (var i = 0; i < docs.length; i += 1) {
+      if (String(docs[i].name) === String(name)) return docs[i];
+    }
+  } catch (err) {
+    return null;
+  }
+  return null;
+}
+
+/** The names of every open document, for error messages. */
+function openDocumentNames() {
+  var out = [];
+  try {
+    var docs = app.documents;
+    for (var i = 0; i < docs.length; i += 1) out.push(String(docs[i].name));
+  } catch (err) {
+    /* no documents, or the host will not say */
+  }
+  return out;
+}
+
+/**
  * The active selection, or `null` when there is none.
  *
  * Read defensively: `selection.bounds` throws on some builds when nothing is
@@ -1149,6 +1180,67 @@ function solidColor(doc, color) {
   });
 }
 
+/**
+ * A `SolidColor` as an RGB triple.
+ *
+ * The DOM returns a `SolidColor` whose only own property is `base` — a JSON
+ * string holding the descriptor, e.g.
+ * `{"desc":{"_obj":"RGBColor","red":255,"blue":255,"green":255}}`. Reading
+ * `.rgb`/`.cmyk` off it (as an ExtendScript-shaped object would allow) yields
+ * nothing at all, which is why colours came back as black no matter what was
+ * set. The structured properties are still consulted afterwards, for a build
+ * that does expose them.
+ */
+function solidColorToRgb(color) {
+  var descriptor = null;
+  var base = color && color.base;
+  if (typeof base === 'string') {
+    try {
+      descriptor = JSON.parse(base).desc;
+    } catch (err) {
+      descriptor = null;
+    }
+  } else if (base && typeof base === 'object') {
+    descriptor = base.desc;
+  }
+
+  if (descriptor && descriptor._obj === 'RGBColor') {
+    return { r: clampByte(descriptor.red), g: clampByte(descriptor.green), b: clampByte(descriptor.blue) };
+  }
+  if (descriptor && descriptor._obj === 'CMYKColor') {
+    var c = Number(descriptor.cyan) / 100;
+    var m = Number(descriptor.magenta) / 100;
+    var y = Number(descriptor.yellow) / 100;
+    var k = Number(descriptor.black) / 100;
+    return {
+      r: clampByte(255 * (1 - Math.min(1, c + k))),
+      g: clampByte(255 * (1 - Math.min(1, m + k))),
+      b: clampByte(255 * (1 - Math.min(1, y + k))),
+    };
+  }
+  if (descriptor && descriptor._obj === 'GrayColor') {
+    var gray = clampByte(Number(descriptor.gray) * 255);
+    return { r: gray, g: gray, b: gray };
+  }
+
+  if (color.rgb) {
+    var rgb = color.rgb;
+    return { r: clampByte(rgb.red), g: clampByte(rgb.green), b: clampByte(rgb.blue) };
+  }
+  if (color.cmyk) {
+    var cmyk = color.cmyk;
+    var cc = Number(cmyk.cyan) / 100;
+    var mm = Number(cmyk.magenta) / 100;
+    var yy = Number(cmyk.yellow) / 100;
+    var kk = Number(cmyk.black) / 100;
+    return {
+      r: clampByte(255 * (1 - Math.min(1, cc + kk))),
+      g: clampByte(255 * (1 - Math.min(1, mm + kk))),
+      b: clampByte(255 * (1 - Math.min(1, yy + kk))),
+    };
+  }
+  return { r: 0, g: 0, b: 0 };
+}
 function clampByte(value) {
   return Math.max(0, Math.min(255, Math.round(Number(value) || 0)));
 }
@@ -1162,7 +1254,10 @@ module.exports = {
   clampByte: clampByte,
   normalizeColor: normalizeColor,
   withForegroundColor: withForegroundColor,
+  findDocumentByName: findDocumentByName,
+  openDocumentNames: openDocumentNames,
   solidColor: solidColor,
+  solidColorToRgb: solidColorToRgb,
   materialize: materialize,
   openDocument: openDocument,
   closeScratchDocument: closeScratchDocument,

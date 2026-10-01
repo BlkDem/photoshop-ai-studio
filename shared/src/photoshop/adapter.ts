@@ -51,7 +51,8 @@ export interface PhotoshopAdapter {
   /** Fill opacity, which fades content without touching effects. */
   setLayerFillOpacity(params: ParamsOf<'set_layer_fill_opacity'>): Promise<LayerInfo>;
   setLayerLocking(params: ParamsOf<'set_layer_locking'>): Promise<LayerInfo>;
-  createFilledLayer(params: ParamsOf<'create_filled_layer'>): Promise<LayerInfo>;
+  duplicateLayers(params: ParamsOf<'duplicate_layers'>): Promise<LayerInfo>;
+  applyImage(params: ParamsOf<'apply_image'>): Promise<LayerInfo>;
   modifySelection(params: ParamsOf<'modify_selection'>): Promise<DocumentState>;
   listFonts(params: ParamsOf<'list_fonts'>): Promise<{ total: number; truncated: boolean; fonts: FontInfo[] }>;
   /*

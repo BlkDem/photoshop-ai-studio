@@ -154,8 +154,12 @@ export class UxpRemoteAdapter implements PhotoshopAdapter {
     return (await this.send('set_layer_locking', params)) as ResultOf<'set_layer_locking'>;
   }
 
-  async createFilledLayer(params: ParamsOf<'create_filled_layer'>): Promise<ResultOf<'create_filled_layer'>> {
-    return (await this.send('create_filled_layer', params)) as ResultOf<'create_filled_layer'>;
+  async duplicateLayers(params: ParamsOf<'duplicate_layers'>): Promise<ResultOf<'duplicate_layers'>> {
+    return (await this.send('duplicate_layers', params)) as ResultOf<'duplicate_layers'>;
+  }
+
+  async applyImage(params: ParamsOf<'apply_image'>): Promise<ResultOf<'apply_image'>> {
+    return (await this.send('apply_image', params)) as ResultOf<'apply_image'>;
   }
 
   async modifySelection(params: ParamsOf<'modify_selection'>): Promise<ResultOf<'modify_selection'>> {

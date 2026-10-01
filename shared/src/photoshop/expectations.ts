@@ -71,14 +71,6 @@ export function deriveExpectations<K extends PhotoshopOpName>(
     case 'set_layer_fill_opacity':
       return [{ kind: 'layer_property', layer: sel(p), property: 'fillOpacity', equals: Number(p.opacity), tolerance: 0.6 }];
 
-    case 'create_filled_layer':
-      // A filled layer is a layer first and a colour second; the colour cannot be
-      // read back from the snapshot, but the layer's existence and kind can.
-      return [
-        { kind: 'layer_exists', layer: { layerName: String(p.name) }, where: 'document' },
-        { kind: 'layer_property', layer: { layerName: String(p.name) }, property: 'type', equals: 'pixel', tolerance: 0 },
-      ];
-
     case 'rasterize_layer':
       // The point of rasterizing is that the layer stops being live.
       return [{ kind: 'layer_property', layer: sel(p), property: 'type', equals: 'pixel', tolerance: 0 }];
@@ -188,6 +180,15 @@ export function deriveExpectations<K extends PhotoshopOpName>(
     case 'save_psd':
       return typeof p.path === 'string' ? [{ kind: 'file_exists', path: p.path }] : [];
 
+    case 'duplicate_layers':
+      // Only checkable when the caller named the copy. Photoshop's own "… copy"
+      // suffix is not knowable in advance, so an unnamed duplicate gets no
+      // expectation rather than a guessed one; the result carries the real name and
+      // the diff shows the new layer.
+      return typeof p.name === 'string'
+        ? [{ kind: 'layer_exists', layer: { layerName: p.name }, where: 'document' }]
+        : [];
+
     case 'duplicate_document':
       // Only checkable when the caller named the copy; otherwise Photoshop appends
       // its own " copy" suffix and any expected name would be a guess.
@@ -211,6 +212,7 @@ export function deriveExpectations<K extends PhotoshopOpName>(
     // snapshot carries. What *is* checkable is that the layer survived and is
     // still on the canvas, which catches the two ways these fail: the layer went
     // missing, or the operation moved it out of the document.
+    case 'apply_image':
     case 'apply_filter':
     case 'flip_layer':
     case 'rotate_layer':
@@ -303,6 +305,15 @@ export function deriveExpectations<K extends PhotoshopOpName>(
         { kind: 'document_property', property: 'width', equals: Number(p.width), tolerance: 1 },
         { kind: 'document_property', property: 'height', equals: Number(p.height), tolerance: 1 },
       ];
+
+    case 'duplicate_layers':
+      // Only checkable when the caller named the copy. Photoshop's own "… copy"
+      // suffix is not knowable in advance, so an unnamed duplicate gets no
+      // expectation rather than a guessed one; the result carries the real name and
+      // the diff shows the new layer.
+      return typeof p.name === 'string'
+        ? [{ kind: 'layer_exists', layer: { layerName: p.name }, where: 'document' }]
+        : [];
 
     case 'duplicate_document': {
       if (p.name === undefined) return [];

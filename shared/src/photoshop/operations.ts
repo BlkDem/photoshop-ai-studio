@@ -87,8 +87,9 @@ export const OPERATION_NAMES = [
   // selection and locking, reachable through the DOM
   'modify_selection',
   'set_layer_locking',
+  'duplicate_layers',
   // pixels
-  'create_filled_layer',
+  'apply_image',
   // text support
   'list_fonts',
   // studio support
@@ -395,7 +396,10 @@ export const OPERATIONS = {
     description:
       'Create a new empty document and make it active. Use this when the request is to start ' +
       'something rather than change what is open — otherwise work on the document the user ' +
-      'already has, because opening a new one hides their work.',
+      'already has, because opening a new one hides their work. `name` is best-effort: ' +
+      '`Document.name` is a getter on this build, so Photoshop usually names the document ' +
+      'itself and the result reports the real name either way. Use `duplicate_document` when ' +
+      'the name has to stick.',
     category: 'document',
     destructive: false,
     requiresConfirmation: false,
@@ -636,6 +640,47 @@ export const OPERATIONS = {
     }),
   },
 
+  duplicate_layers: {
+    tool: 'photoshop.duplicate_layers',
+    title: 'Duplicate Layer',
+    description:
+      'Copy a layer and place the copy in the stack. Names the copy explicitly, because ' +
+      'Photoshop would otherwise call it "Something copy" and a later step referring to ' +
+      'it by name would have to guess. `placement` works like `reorder_layer`.',
+    category: 'layer',
+    destructive: false,
+    requiresConfirmation: false,
+    params: LayerSelectorSchema.extend({
+      /** Where the copy goes in the stack. */
+      placement: ElementPlacementSchema.default('placeAtEnd'),
+      /** Name for the copy. Without it the copy keeps Photoshop\'s "… copy" name. */
+      name: z.string().min(1).optional(),
+    }),
+    result: LayerInfoSchema,
+  },
+
+  apply_image: {
+    tool: 'photoshop.apply_image',
+    title: 'Apply Image Onto Layer',
+    description:
+      'Composite the contents of another **open** document onto a layer, with an optional ' +
+      'offset, scale, blend mode and opacity. This replaces the layer\'s pixels rather ' +
+      'than painting on top, which is why it asks for confirmation. The source must ' +
+      'already be open: use `duplicate_document` or open it in Photoshop first.',
+    category: 'image',
+    destructive: true,
+    requiresConfirmation: true,
+    params: LayerSelectorSchema.extend({
+      /** Name of the open document whose pixels are applied. */
+      sourceName: z.string().min(1),
+      offset: z.object({ x: z.number().default(0), y: z.number().default(0) }).optional(),
+      scale: z.object({ x: z.number().positive().default(1), y: z.number().positive().default(1) }).optional(),
+      blendMode: BlendModeSchema.optional(),
+      opacity: z.number().int().min(0).max(100).optional(),
+    }),
+    result: LayerInfoSchema,
+  },
+
   set_layer_locking: {
     tool: 'photoshop.set_layer_locking',
     title: 'Set Layer Locking',
@@ -672,25 +717,6 @@ export const OPERATIONS = {
       amount: z.number().min(0).max(1000).optional(),
     }),
     result: DocumentStateSchema,
-  },
-
-  create_filled_layer: {
-    tool: 'photoshop.create_filled_layer',
-    title: 'Create Filled Layer',
-    description:
-      'Create a new pixel layer filled with a solid colour. Distinct from `create_layer`, ' +
-      'which asks Photoshop for an empty layer that the caller then fills. Use this for a ' +
-      'flat wash or a background. The layer always covers the whole canvas: this is the ' +
-      'only way to fill a layer through the DOM, since there is no per-layer fill, and ' +
-      'Photoshop refuses to move a full-canvas layer.',
-    category: 'layer',
-    destructive: false,
-    requiresConfirmation: false,
-    params: z.object({
-      name: z.string().min(1),
-      color: ColorInputSchema,
-    }),
-    result: LayerInfoSchema,
   },
 
   set_layer_fill_opacity: {
