@@ -28,6 +28,17 @@ export interface PhotoshopAdapter {
   /** Human-readable description of the backend (used by Studio's status line). */
   readonly target: AdapterTarget;
 
+  /**
+   * Runs a diagnostic operation by name, bypassing the dispatch table.
+   *
+   * Optional on purpose. Diagnostics exist to interrogate a live host, so only
+   * an adapter that can actually reach Photoshop implements this. The mock does
+   * not, and is answered with a clear `UNSUPPORTED_OPERATION` rather than a
+   * fabricated result — a mock that invented pixel values would defeat the
+   * entire purpose of probing.
+   */
+  diagnostic?(op: string, params: unknown): Promise<unknown>;
+
   isConnected(): boolean;
   getConnection(): AdapterConnection;
 

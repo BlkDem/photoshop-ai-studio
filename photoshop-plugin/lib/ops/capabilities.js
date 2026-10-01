@@ -424,4 +424,140 @@ function sampleShapes() {
   return out;
 }
 
-module.exports = { get_capabilities: getCapabilities };
+/**
+ * TEMPORARY — `probe_draw`, for deciding how to fill a layer.
+ *
+ * ADR-014 removed `create_filled_layer` because three routes were tried and none
+ * filled anything: a named layer appeared, reported type "pixel", and measured
+ * 0×0. Guessing from an API reference is what produced that.
+ *
+ * This asks the host directly. The decisive measurement is the sampled pixel —
+ * a route that returns a layer has proved nothing — and the decisive precursor
+ * is the bounds `doc.createLayer` actually produces, because a fill applied to a
+ * layer with no area can only ever leave it empty.
+ */
+function probeDraw(ctx) {
+  var params = ctx.params || {};
+  var doc = ps.resolveDocument(params.documentId);
+  var SIZE = 120;
+  var rgb = { r: 220, g: 40, b: 40 };
+  var steps = [];
+
+  function sample(cx, cy) {
+    try {
+      var sampler = doc.colorSampler;
+      if (!sampler) return null;
+      return ps.solidColorToRgb(sampler.samplePixel({ x: cx, y: cy }));
+    } catch (err) {
+      return null;
+    }
+  }
+
+  function step(label, fn) {
+    return Promise.resolve()
+      .then(fn)
+      .then(
+        function (note) {
+          steps.push({ step: label, ok: true, note: note || null });
+        },
+        function (err) {
+          steps.push({ step: label, ok: false, error: (err && err.message) || String(err) });
+        },
+      );
+  }
+
+  var layer = null;
+
+  // 1. What does the DOM actually give us? `create_layer` is a verified
+  //    capability, so if this comes back 0×0 then every later fill is hopeless
+  //    and the route has to start from a document, not a layer.
+  var created = step('createLayer bounds', function () {
+    return doc.createLayer({ name: 'probe-fill' }).then(function (made) {
+      layer = made;
+      var b = ps.boundsOf(made);
+      return {
+        width: Math.round(b.width),
+        height: Math.round(b.height),
+        kind: made.kind || null,
+        hasScale: typeof made.scale === 'function',
+      };
+    });
+  });
+
+  // 2. The fill itself, on whatever that layer turned out to be.
+  var filled = created.then(function () {
+    return step('set fill descriptor on that layer', function () {
+      return ps.batchPlay([
+        {
+          _obj: 'set',
+          _target: [{ _ref: 'layer', _enum: 'ordinal', _value: 'targetEnum' }],
+          to: { _obj: 'solidColorLayer', color: { _obj: 'RGBColor', red: rgb.r, green: rgb.g, blue: rgb.b } },
+          _options: { dialogOptions: 'dontDisplay' },
+        },
+      ]).then(function () {
+        var b = ps.boundsOf(layer);
+        return {
+          bounds: { width: Math.round(b.width), height: Math.round(b.height) },
+          color: sample(Math.round(b.x + b.width / 2), Math.round(b.y + b.height / 2)),
+        };
+      });
+    });
+  });
+
+  // 3. If the layer has no area, can it be given some and then filled? `scale`
+  //    is a verified capability on layers that do have area, so this separates
+  //    "the fill route is wrong" from "there was nothing to fill".
+  var sized = filled.then(function () {
+    return step('scale to 120x120 then fill', function () {
+      var b = ps.boundsOf(layer);
+      if (!b.width || !b.height) return { note: 'layer has no area; scale cannot create any', skipped: true };
+      return layer.scale(SIZE / b.width, SIZE / b.height).then(function () {
+        var after = ps.boundsOf(layer);
+        return ps
+          .batchPlay([
+            {
+              _obj: 'set',
+              _target: [{ _ref: 'layer', _enum: 'ordinal', _value: 'targetEnum' }],
+              to: { _obj: 'solidColorLayer', color: { _obj: 'RGBColor', red: rgb.r, green: rgb.g, blue: rgb.b } },
+              _options: { dialogOptions: 'dontDisplay' },
+            },
+          ])
+          .then(function () {
+            var now = ps.boundsOf(layer);
+            return {
+              bounds: { width: Math.round(now.width), height: Math.round(now.height) },
+              color: sample(Math.round(now.x + now.width / 2), Math.round(now.y + now.height / 2)),
+            };
+          });
+      });
+    });
+  });
+
+  // 4. Is there a path API at all on this build?
+  var paths = sized.then(function () {
+    return step('pathItems surface', function () {
+      return {
+        present: !!doc.pathItems,
+        methods: doc.pathItems
+          ? Object.keys(doc.pathItems).filter(function (k) {
+              return typeof doc.pathItems[k] === 'function';
+            })
+          : [],
+      };
+    });
+  });
+
+  return paths.then(function () {
+    return {
+      document: doc.name,
+      probeColor: rgb,
+      steps: steps,
+      // The one number that matters: did anything become the colour we asked for?
+      anyRouteWrotePixels: steps.some(function (s) {
+        return !!(s.note && s.note.color && (s.note.color.r < 200 || s.note.color.g < 200 || s.note.color.b < 200));
+      }),
+    };
+  });
+}
+
+module.exports = { get_capabilities: getCapabilities, probe_draw: probeDraw };

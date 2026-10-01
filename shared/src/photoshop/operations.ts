@@ -94,6 +94,11 @@ export const OPERATION_NAMES = [
   'list_fonts',
   // studio support
   'render_preview',
+  /**
+   * Diagnostics. Dispatchable, excluded from `TOOL_META`, and only present while
+   * a host question is being answered — see the `diagnostic` flag.
+   */
+  'probe_draw',
 ] as const;
 
 export type PhotoshopOpName = (typeof OPERATION_NAMES)[number];
@@ -304,6 +309,15 @@ export interface OperationDefinition {
   readonly requiresConfirmation: boolean;
   readonly params: z.ZodType;
   readonly result: z.ZodType;
+  /**
+   * Dispatchable but never advertised in `tools/list`.
+   *
+   * Diagnostics exist to interrogate a live host — which route actually fills a
+   * layer, whether an API is present on this build. They have to be reachable,
+   * and they must not be selectable by a planner: an operation a model can plan
+   * with is a promise the project then has to keep, and a probe is not one.
+   */
+  readonly diagnostic?: boolean;
 }
 
 type OperationDefinitionMap = { readonly [K in PhotoshopOpName]: OperationDefinition };
@@ -1215,6 +1229,41 @@ export const OPERATIONS = {
     }),
     result: PreviewResultSchema,
   },
+
+  /**
+   * TEMPORARY diagnostic. Ask the running host which layer-fill route actually
+   * writes pixels, since ADR-014 had to withdraw `create_filled_layer` after
+   * three attempts left a named 0×0 layer that reported success. Dispatchable,
+   * deliberately absent from `tools/list`, and removed once the surface it
+   * justifies has been implemented and verified on device.
+   */
+  probe_draw: {
+    tool: 'photoshop.probe_draw',
+    title: 'Probe Drawing Routes',
+    description:
+      'Diagnostic. Attempts each candidate drawing route against the open document and reports the ' +
+      'bounds and sampled pixel of each result. Mutates the document — use a scratch file.',
+    category: 'canvas',
+    destructive: true,
+    requiresConfirmation: true,
+    diagnostic: true,
+    params: DocumentTargetSchema,
+    result: z.object({
+      document: z.string(),
+      probeColor: RgbColorSchema,
+      /** Ordered narration of what was attempted and what each attempt measured. */
+      steps: z.array(
+        z.object({
+          step: z.string(),
+          ok: z.boolean(),
+          note: z.unknown().optional(),
+          error: z.string().optional(),
+        }),
+      ),
+      /** The single number that matters: did any attempt produce the colour asked for? */
+      anyRouteWrotePixels: z.boolean(),
+    }),
+  },
 } satisfies OperationDefinitionMap;
 
 // ---------------------------------------------------------------------------
@@ -1260,7 +1309,16 @@ export const ToolMetaSchema = z.object({
 });
 
 /** Tool metadata for the Studio UI and for prompt construction. */
-export const TOOL_META: readonly ToolMeta[] = OP_NAMES.map((op) => ({
+/**
+ * The catalogue handed to the planner and the Studio's tool list.
+ *
+ * Diagnostics are excluded. They live in the registry so the server can
+ * dispatch them, and they are reachable by name for whoever is interrogating a
+ * host — but a planner that can select an operation is making a promise the
+ * project has to keep, and a probe that mutates the document to answer a
+ * question is not one it should be choosing.
+ */
+export const TOOL_META: readonly ToolMeta[] = OP_NAMES.filter((op) => !(OPERATIONS[op] as OperationDefinition).diagnostic).map((op) => ({
   tool: OPERATIONS[op].tool,
   op,
   title: OPERATIONS[op].title,

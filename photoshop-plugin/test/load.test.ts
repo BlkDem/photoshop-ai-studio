@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
-import { OP_NAMES } from '@photoshop-ai-studio/shared';
+import { OPERATIONS, OP_NAMES } from '@photoshop-ai-studio/shared';
 
 /**
  * Plugin load test.
@@ -183,7 +183,11 @@ describe('UXP plugin loads', () => {
 
   it('exposes every operation from the shared registry', () => {
     const adapter = loadPluginFile(pluginRoot, 'lib/adapter.js') as { SUPPORTED: string[]; OPERATIONS: Record<string, unknown> };
-    expect([...adapter.SUPPORTED].sort()).toEqual([...OP_NAMES].sort());
+    // SUPPORTED is the advertised surface: it must cover the shared registry
+    // exactly, with diagnostics deliberately absent, while every registered
+    // operation — diagnostic or not — still resolves to a function.
+    const advertised = OP_NAMES.filter((op) => !(OPERATIONS[op] as { diagnostic?: boolean }).diagnostic);
+    expect([...adapter.SUPPORTED].sort()).toEqual([...advertised].sort());
     for (const op of OP_NAMES) {
       expect(typeof adapter.OPERATIONS[op], op).toBe('function');
     }

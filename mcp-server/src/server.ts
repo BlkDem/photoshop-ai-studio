@@ -14,7 +14,7 @@ import {
   type PhotoshopOpName,
 } from '@photoshop-ai-studio/shared';
 import type { Logger } from '@photoshop-ai-studio/shared/node';
-import { DISPATCH } from './dispatch.js';
+import { diagnosticOrRefuse, handlerFor } from './dispatch.js';
 
 /**
  * The MCP surface.
@@ -98,7 +98,12 @@ export function createMcpServer(options: CreateMcpServerOptions): McpServer {
           const parsed = validateParams(op, args);
           log.debug({ event: 'mcp.call', message: 'validated arguments', data: parsed });
 
-          const data = await DISPATCH[op](adapter, parsed as never);
+          // Diagnostics have no dispatch entry and go straight to a host that can
+          // run them. `handlerFor` answers with a clear refusal otherwise, which
+          // is what the mock gets — it must not invent pixels to probe with.
+          const data = (OPERATIONS[op] as OperationDefinition).diagnostic
+            ? await diagnosticOrRefuse(adapter, op, parsed)
+            : await handlerFor(op)(adapter, parsed as never);
 
           // Validate our own output against the registry's result schema so a
           // malformed adapter response is caught here, not three layers up.

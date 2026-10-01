@@ -29,6 +29,7 @@ var OPERATIONS = {
   get_document: canvasOps.get_document,
   get_document_info: canvasOps.get_document_info,
   get_capabilities: capabilityOps.get_capabilities,
+  probe_draw: capabilityOps.probe_draw,
   set_selection: canvasOps.set_selection,
   modify_selection: canvasOps.modify_selection,
   trim_document: canvasOps.trim_document,
@@ -104,7 +105,17 @@ var READ_ONLY = {
   get_text_layer: true,
 };
 
-var SUPPORTED = Object.keys(OPERATIONS);
+/**
+ * The advertised tool surface.
+ *
+ * Diagnostics (`probe_*`) are dispatchable by name so a live host can be
+ * interrogated, but they are deliberately not advertised: `SUPPORTED` is what
+ * the shared registry and the Studio believe exists, and an operation that
+ * appears there is a promise the project then has to keep.
+ */
+var SUPPORTED = Object.keys(OPERATIONS).filter(function (op) {
+  return op.indexOf('probe_') !== 0;
+});
 
 /**
  * Executes one bridge operation and returns the wire envelope.

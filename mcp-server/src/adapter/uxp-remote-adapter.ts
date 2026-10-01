@@ -44,6 +44,18 @@ export class UxpRemoteAdapter implements PhotoshopAdapter {
   }
 
   /**
+   * Diagnostics go straight down the bridge.
+   *
+   * They have no entry in the dispatch table by design — a mock must never be
+   * able to answer "which route actually fills a layer" — so this is the only
+   * path that can reach them, and only an adapter talking to a real Photoshop
+   * has one.
+   */
+  diagnostic(op: string, params: unknown): Promise<unknown> {
+    return this.send(op, params);
+  }
+
+  /**
    * Rewrites every `path` in an operation payload to its workspace-relative form.
    *
    * The bridge carries relative paths on purpose: the plugin can be on another

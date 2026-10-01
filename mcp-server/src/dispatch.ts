@@ -1,4 +1,12 @@
-import { normalizeColor, type ParamsOf, type PhotoshopAdapter, type PhotoshopOpName, type ResultOf } from '@photoshop-ai-studio/shared';
+import {
+  StudioException,
+  normalizeColor,
+  type ParamsOf,
+  type PhotoshopAdapter,
+  type PhotoshopOpName,
+  type ResultOf,
+  type OPERATIONS,
+} from '@photoshop-ai-studio/shared';
 
 /**
  * The op → adapter-method table.
@@ -8,8 +16,19 @@ import { normalizeColor, type ParamsOf, type PhotoshopAdapter, type PhotoshopOpN
  * handler whose parameter types drift from the registry is a compile error too.
  * The result is the complete, checked implementation of the MCP tool surface.
  */
+/**
+ * Operation names that form the advertised tool surface.
+ *
+ * Diagnostics are excluded for the same reason they are kept out of
+ * `TOOL_META`: they answer a question about one host and are never something a
+ * caller should be planning with, so no adapter is obliged to implement them.
+ */
+export type PublicOpName = {
+  [K in PhotoshopOpName]: (typeof OPERATIONS)[K] extends { diagnostic: true } ? never : K;
+}[PhotoshopOpName];
+
 export type OpDispatcher = {
-  [K in PhotoshopOpName]: (adapter: PhotoshopAdapter, params: ParamsOf<K>) => Promise<ResultOf<K>>;
+  [K in PublicOpName]: (adapter: PhotoshopAdapter, params: ParamsOf<K>) => Promise<ResultOf<K>>;
 };
 
 export const DISPATCH: OpDispatcher = {
@@ -88,10 +107,53 @@ export const DISPATCH: OpDispatcher = {
   render_preview: (a, p) => a.renderPreview(p),
 };
 
+/**
+ * Looks a handler up, failing loudly when there is none.
+ *
+ * Diagnostics have no entry on purpose — they need a real Photoshop to answer
+ * anything — so reaching one here means it was routed somewhere it cannot run,
+ * and saying so beats a `TypeError` from indexing `undefined`.
+ */
+export function handlerFor(
+  op: PhotoshopOpName,
+): (adapter: PhotoshopAdapter, params: never) => Promise<unknown> {
+  const handler = (DISPATCH as unknown as Record<string, ((adapter: PhotoshopAdapter, params: never) => Promise<unknown>) | undefined>)[op];
+  if (!handler) {
+    throw new StudioException(
+      'UNSUPPORTED_OPERATION',
+      `"${op}" is a host diagnostic and can only run against the Photoshop plugin.`,
+      { recoverable: false },
+    );
+  }
+  return handler;
+}
+
+/**
+ * Runs a diagnostic against an adapter that can reach a real host.
+ *
+ * Refuses loudly otherwise: a mock that answered a probe with invented pixel
+ * values would be worse than no answer, because the whole purpose of the probe
+ * is finding out what Photoshop actually does.
+ */
+export async function diagnosticOrRefuse(
+  adapter: PhotoshopAdapter,
+  op: PhotoshopOpName,
+  params: unknown,
+): Promise<unknown> {
+  if (typeof adapter.diagnostic !== 'function') {
+    throw new StudioException(
+      'UNSUPPORTED_OPERATION',
+      `"${op}" needs a real Photoshop: the ${adapter.target} backend cannot answer a host diagnostic.`,
+      { recoverable: false },
+    );
+  }
+  return adapter.diagnostic(op, params);
+}
+
 export async function callAdapter<K extends PhotoshopOpName>(
   adapter: PhotoshopAdapter,
   op: K,
   params: ParamsOf<K>,
 ): Promise<ResultOf<K>> {
-  return DISPATCH[op](adapter, params) as Promise<ResultOf<K>>;
+  return handlerFor(op)(adapter, params as never) as Promise<ResultOf<K>>;
 }
