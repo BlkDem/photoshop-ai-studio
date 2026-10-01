@@ -98,13 +98,20 @@ export function useStudio(): StudioSlice & StudioActions {
 
   // --- live events ---------------------------------------------------------
 
+  // The stream outlives any single run, so the event handler must read the
+  // current run without the effect depending on it. The ref lives here, in the
+  // component body: calling `useRef` inside the effect below is a Rules-of-Hooks
+  // violation, and React throws "Invalid hook call" and unmounts the whole app
+  // rather than degrading one feature.
+  const activeRunRef = useRef(activeRunId);
+  useEffect(() => {
+    activeRunRef.current = activeRunId;
+  });
+
   useEffect(() => {
     // One long-lived stream for the lifetime of the tab; `handleEvent` is stable
     // because every setter it touches is a React state setter, and `activeRunId`
     // is read through a ref so a changing run does not tear the stream down.
-    const activeRunRef = useRef(activeRunId);
-    activeRunRef.current = activeRunId;
-
     const handleEvent = (event: StudioEvent): void => {
     switch (event.type) {
       case 'log':
