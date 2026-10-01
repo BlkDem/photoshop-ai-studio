@@ -161,6 +161,35 @@ function verticalFor(anchor) {
  * `Document.name` is getter-only, as it is on Photoshop 26.11. The result always
  * carries the name Photoshop actually gave the document.
  */
+/**
+ * Resolves a requested fill to what this build actually accepts.
+ *
+ * `documents.add()` takes `fill` from the `DocumentFill` family —
+ * `BACKGROUNDCOLOR`, `BLACK`, `COLOR`, `TRANSPARENT`, `WHITE` — and a plain
+ * string is matched against the same names. The tool schema offers
+ * `white | background | transparent`, and "background" is not one of them:
+ * passing it through failed on every host that validates the enum
+ * ("Expected 'background' to be one of DocumentFill"). The background colour is
+ * spelled `backgroundColor`.
+ *
+ * Prefers the enum when the build exposes it, and falls back to the matching
+ * string. Same shape as the blend-mode resolution in ops/layers.js.
+ */
+var FILL_BY_REQUEST = {
+  white: 'WHITE',
+  background: 'BACKGROUNDCOLOR',
+  transparent: 'TRANSPARENT',
+};
+
+function fillValue(requested) {
+  var wanted = FILL_BY_REQUEST[requested] || FILL_BY_REQUEST.white;
+  var enumObject = ps.constants && ps.constants.DocumentFill;
+  if (enumObject && typeof enumObject[wanted] !== 'undefined') return enumObject[wanted];
+  // UXP accepts the enum name as a string; `BLACK` is deliberately not offered
+  // because the schema does not expose it and guessing it would invent a fill.
+  return wanted.toLowerCase();
+}
+
 function createDocument(ctx) {
   var params = ctx.params;
   var width = typeof params.width === 'number' ? params.width : 1920;
@@ -172,7 +201,7 @@ function createDocument(ctx) {
       width: width,
       height: height,
       resolution: typeof params.resolution === 'number' ? params.resolution : 72,
-      fill: params.background === 'background' ? 'background' : params.background === 'transparent' ? 'transparent' : 'white',
+      fill: fillValue(params.background),
     });
   } catch (err) {
     throw StudioError('STEP_FAILED', 'Photoshop would not create the document: ' + ((err && err.message) || String(err)), {
