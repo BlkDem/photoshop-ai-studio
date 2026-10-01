@@ -23,6 +23,10 @@ photoshop-plugin/.uxp/
 data/
 logs/
 tmp/
+# WORKSPACE_ROOT when it points inside the checkout. Exports and placed assets
+# are written here by the running stack; the configured location is usually
+# outside the repo, so only the local convenience layout needs ignoring.
+workspace/
 
 .DS_Store
 Thumbs.db
