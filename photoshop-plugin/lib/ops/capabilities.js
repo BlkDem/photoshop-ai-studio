@@ -31,6 +31,28 @@ var uxp = require('uxp');
  * sweep in `scripts/sweep-mcp.ps1` is the thing to run first. Do not add an entry
  * because the API exists: that is the trap this file exists to make visible.
  */
+/**
+ * Measured on this build and NOT usable, recorded here so the `api`/`usable`
+ * split above is not a way of hiding it.
+ *
+ * `layer.create` was on this list and should never have been. `createLayer` and
+ * `createPixelLayer` both return a 0×0 layer, and their `width`, `height` and
+ * `fill` options are accepted and ignored — so there is no area to scale into
+ * and no pixels to fill. It reported success, named the layer, and passed every
+ * declared check, because no check measured area. `layer.scale` is off for the
+ * same reason: it is reached through a layer that has none.
+ *
+ * `create_layer` now refuses instead of returning an empty layer. Bringing pixels
+ * in still works, and is what the refusal points at: `place_image` and
+ * `apply_image` both genuinely write pixels.
+ */
+var NOT_USABLE = {
+  'layer.create': 'document.createLayer and createPixelLayer both return 0×0; width/height/fill are ignored',
+  'layer.scale': 'unreachable: the layer it would scale has no area',
+  'layer.fill': 'no working route found; `make content layer` hangs and selection.fill does not exist',
+  'shape.create': 'no working route found; `make content layer` with a shape hangs',
+};
+
 var VERIFIED = [
   'document.read',
   'document.duplicate',
@@ -41,7 +63,6 @@ var VERIFIED = [
   'document.export_psd',
   'document.preview',
   'layer.list',
-  'layer.create',
   'layer.delete',
   'layer.rename',
   'layer.visibility',
@@ -49,7 +70,6 @@ var VERIFIED = [
   'layer.group',
   'layer.reorder',
   'layer.move',
-  'layer.scale',
   'image.place',
   'text.create',
   'text.read',
@@ -328,8 +348,13 @@ function getCapabilities() {
       unsupported.push(id);
     } else {
       entry.usable = VERIFIED.indexOf(id) !== -1;
+      // Measured on this host and found not to work. Saying "not yet exercised"
+      // here would be a guess dressed as a record, and would leave a known-false
+      // capability looking merely unproven.
+      var measured = NOT_USABLE[id];
       var absent = entry.api ? undefined : NOT_ON_DOM[id];
-      if (absent) entry.note = absent;
+      if (measured) entry.note = 'Present but does not work on this build: ' + measured;
+      else if (absent) entry.note = absent;
       else if (!entry.usable && entry.api) entry.note = 'Present, but not yet exercised against this build.';
     }
     capabilities[id] = entry;
@@ -424,140 +449,4 @@ function sampleShapes() {
   return out;
 }
 
-/**
- * TEMPORARY — `probe_draw`, for deciding how to fill a layer.
- *
- * ADR-014 removed `create_filled_layer` because three routes were tried and none
- * filled anything: a named layer appeared, reported type "pixel", and measured
- * 0×0. Guessing from an API reference is what produced that.
- *
- * This asks the host directly. The decisive measurement is the sampled pixel —
- * a route that returns a layer has proved nothing — and the decisive precursor
- * is the bounds `doc.createLayer` actually produces, because a fill applied to a
- * layer with no area can only ever leave it empty.
- */
-function probeDraw(ctx) {
-  var params = ctx.params || {};
-  var doc = ps.resolveDocument(params.documentId);
-  var SIZE = 120;
-  var rgb = { r: 220, g: 40, b: 40 };
-  var steps = [];
-
-  function sample(cx, cy) {
-    try {
-      var sampler = doc.colorSampler;
-      if (!sampler) return null;
-      return ps.solidColorToRgb(sampler.samplePixel({ x: cx, y: cy }));
-    } catch (err) {
-      return null;
-    }
-  }
-
-  function step(label, fn) {
-    return Promise.resolve()
-      .then(fn)
-      .then(
-        function (note) {
-          steps.push({ step: label, ok: true, note: note || null });
-        },
-        function (err) {
-          steps.push({ step: label, ok: false, error: (err && err.message) || String(err) });
-        },
-      );
-  }
-
-  var layer = null;
-
-  // 1. What does the DOM actually give us? `create_layer` is a verified
-  //    capability, so if this comes back 0×0 then every later fill is hopeless
-  //    and the route has to start from a document, not a layer.
-  var created = step('createLayer bounds', function () {
-    return doc.createLayer({ name: 'probe-fill' }).then(function (made) {
-      layer = made;
-      var b = ps.boundsOf(made);
-      return {
-        width: Math.round(b.width),
-        height: Math.round(b.height),
-        kind: made.kind || null,
-        hasScale: typeof made.scale === 'function',
-      };
-    });
-  });
-
-  // 2. The fill itself, on whatever that layer turned out to be.
-  var filled = created.then(function () {
-    return step('set fill descriptor on that layer', function () {
-      return ps.batchPlay([
-        {
-          _obj: 'set',
-          _target: [{ _ref: 'layer', _enum: 'ordinal', _value: 'targetEnum' }],
-          to: { _obj: 'solidColorLayer', color: { _obj: 'RGBColor', red: rgb.r, green: rgb.g, blue: rgb.b } },
-          _options: { dialogOptions: 'dontDisplay' },
-        },
-      ]).then(function () {
-        var b = ps.boundsOf(layer);
-        return {
-          bounds: { width: Math.round(b.width), height: Math.round(b.height) },
-          color: sample(Math.round(b.x + b.width / 2), Math.round(b.y + b.height / 2)),
-        };
-      });
-    });
-  });
-
-  // 3. If the layer has no area, can it be given some and then filled? `scale`
-  //    is a verified capability on layers that do have area, so this separates
-  //    "the fill route is wrong" from "there was nothing to fill".
-  var sized = filled.then(function () {
-    return step('scale to 120x120 then fill', function () {
-      var b = ps.boundsOf(layer);
-      if (!b.width || !b.height) return { note: 'layer has no area; scale cannot create any', skipped: true };
-      return layer.scale(SIZE / b.width, SIZE / b.height).then(function () {
-        var after = ps.boundsOf(layer);
-        return ps
-          .batchPlay([
-            {
-              _obj: 'set',
-              _target: [{ _ref: 'layer', _enum: 'ordinal', _value: 'targetEnum' }],
-              to: { _obj: 'solidColorLayer', color: { _obj: 'RGBColor', red: rgb.r, green: rgb.g, blue: rgb.b } },
-              _options: { dialogOptions: 'dontDisplay' },
-            },
-          ])
-          .then(function () {
-            var now = ps.boundsOf(layer);
-            return {
-              bounds: { width: Math.round(now.width), height: Math.round(now.height) },
-              color: sample(Math.round(now.x + now.width / 2), Math.round(now.y + now.height / 2)),
-            };
-          });
-      });
-    });
-  });
-
-  // 4. Is there a path API at all on this build?
-  var paths = sized.then(function () {
-    return step('pathItems surface', function () {
-      return {
-        present: !!doc.pathItems,
-        methods: doc.pathItems
-          ? Object.keys(doc.pathItems).filter(function (k) {
-              return typeof doc.pathItems[k] === 'function';
-            })
-          : [],
-      };
-    });
-  });
-
-  return paths.then(function () {
-    return {
-      document: doc.name,
-      probeColor: rgb,
-      steps: steps,
-      // The one number that matters: did anything become the colour we asked for?
-      anyRouteWrotePixels: steps.some(function (s) {
-        return !!(s.note && s.note.color && (s.note.color.r < 200 || s.note.color.g < 200 || s.note.color.b < 200));
-      }),
-    };
-  });
-}
-
-module.exports = { get_capabilities: getCapabilities, probe_draw: probeDraw };
+module.exports = { get_capabilities: getCapabilities };

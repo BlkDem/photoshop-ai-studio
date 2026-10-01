@@ -94,11 +94,6 @@ export const OPERATION_NAMES = [
   'list_fonts',
   // studio support
   'render_preview',
-  /**
-   * Diagnostics. Dispatchable, excluded from `TOOL_META`, and only present while
-   * a host question is being answered — see the `diagnostic` flag.
-   */
-  'probe_draw',
 ] as const;
 
 export type PhotoshopOpName = (typeof OPERATION_NAMES)[number];
@@ -1230,40 +1225,6 @@ export const OPERATIONS = {
     result: PreviewResultSchema,
   },
 
-  /**
-   * TEMPORARY diagnostic. Ask the running host which layer-fill route actually
-   * writes pixels, since ADR-014 had to withdraw `create_filled_layer` after
-   * three attempts left a named 0×0 layer that reported success. Dispatchable,
-   * deliberately absent from `tools/list`, and removed once the surface it
-   * justifies has been implemented and verified on device.
-   */
-  probe_draw: {
-    tool: 'photoshop.probe_draw',
-    title: 'Probe Drawing Routes',
-    description:
-      'Diagnostic. Attempts each candidate drawing route against the open document and reports the ' +
-      'bounds and sampled pixel of each result. Mutates the document — use a scratch file.',
-    category: 'canvas',
-    destructive: true,
-    requiresConfirmation: true,
-    diagnostic: true,
-    params: DocumentTargetSchema,
-    result: z.object({
-      document: z.string(),
-      probeColor: RgbColorSchema,
-      /** Ordered narration of what was attempted and what each attempt measured. */
-      steps: z.array(
-        z.object({
-          step: z.string(),
-          ok: z.boolean(),
-          note: z.unknown().optional(),
-          error: z.string().optional(),
-        }),
-      ),
-      /** The single number that matters: did any attempt produce the colour asked for? */
-      anyRouteWrotePixels: z.boolean(),
-    }),
-  },
 } satisfies OperationDefinitionMap;
 
 // ---------------------------------------------------------------------------

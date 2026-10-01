@@ -221,11 +221,30 @@ export function deriveExpectations<K extends PhotoshopOpName>(
         { kind: 'layer_property', layer: sel(p), property: 'withinCanvas', equals: true, tolerance: 0 },
       ];
 
-    case 'create_layer':
-      return [
+    case 'create_layer': {
+      const out: Expectation[] = [
         { kind: 'layer_exists', layer: { layerName: String(p.name) }, where: 'document' },
         { kind: 'layer_property', layer: { layerName: String(p.name) }, property: 'name', equals: String(p.name), tolerance: 0 },
       ];
+      /**
+       * Existence and name are not enough, and the gap was not theoretical.
+       *
+       * On this build every DOM layer factory returns 0×0 and silently ignores
+       * `width`, `height` and `fill`. The layer existed, was named correctly, and
+       * contained nothing — so both expectations above passed, verification
+       * reported success, and the plan moved on. A requested size is therefore
+       * checked as a measurement of the result rather than assumed from the
+       * request, and when no size was asked for the layer must still not be
+       * empty.
+       */
+      if (typeof p.width === 'number') {
+        out.push({ kind: 'layer_property', layer: { layerName: String(p.name) }, property: 'width', equals: p.width, tolerance: 2 });
+      }
+      if (typeof p.height === 'number') {
+        out.push({ kind: 'layer_property', layer: { layerName: String(p.name) }, property: 'height', equals: p.height, tolerance: 2 });
+      }
+      return out;
+    }
 
     case 'create_group':
       return [
