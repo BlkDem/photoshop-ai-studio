@@ -36,6 +36,7 @@ adapter touches Photoshop; only the plugin knows Adobe exists.
 12. [ADR-011 — Writing a value is not the same as applying it](#adr-011--writing-a-value-is-not-the-same-as-applying-it)
 13. [ADR-012 — The servers must be restarted, or the evidence lies](#adr-012--the-servers-must-be-restarted-or-the-evidence-lies)
 14. [ADR-013 — Five more from the DOM, two of which could not be built](#adr-013--five-more-from-the-dom-two-of-which-could-not-be-built)
+15. [ADR-014 — One undo step per run is not reachable from the DOM](#adr-014--one-undo-step-per-run-is-not-reachable-from-the-dom)
 12. [Tool surface: why there is no `execute_anything`](#tool-surface-why-there-is-no-execute_anything)
 13. [End-to-end walkthrough](#end-to-end-walkthrough)
 14. [Security model](#security-model)
@@ -461,6 +462,45 @@ against an accumulated document it fails with "layer not found" and reads exactl
 like a regression — five of twenty-eight probes failed that way before the cause
 turned out to be state, not code. Rebuild the fixture before a sweep, and treat
 "layer not found" in one of these files as a fixture question first.
+
+---
+
+## ADR-014 — One undo step per run is not reachable from the DOM
+
+A run is many requests. The obvious design for making it a single Ctrl+Z is to open an
+undo bracket before the first step and close it after the last, holding
+`Document.suspendHistory(name, callback)` open in between. It was built, measured, and
+removed. Two findings, neither inferred:
+
+**The answer cannot be sent from inside the bracket.** Resolving the `begin_history`
+response from within the `suspendHistory` callback — which is what "resolve once the
+bracket is genuinely open" means — deadlocks. UXP does not run that callback until the
+operation handler has answered, so the answer is never sent and the bridge times out
+after thirty seconds. Reversing the order fixes the deadlock and opens the bracket too
+late to promise anything.
+
+**The bracket does not survive the request at all.** With the deadlock out of the way,
+`begin_history` answers `opened: false` and the follow-up `end_history` reports no
+bracket open — the host rejects the suspension once the enclosing execution context
+ends. Three edits issued as three requests produced three history entries, exactly as
+if no bracket existed. Counted with `historyStates.length` over COM, the same route the
+demo fixture uses.
+
+Removed rather than left behind a flag: a switch that claims a grouping and does not
+produce one is worse than no switch, and the same standard removed
+`create_filled_layer` earlier. `get_capabilities` records the limit as
+`document.history_bracket`.
+
+**What would work** is a composite operation: the MCP server validates each step against
+its own schema, then sends the whole run as one request, and the plugin performs every
+step inside a single `suspendHistory` callback. Nothing this system relies on is lost —
+approval is collected for the whole plan before execution, and verification compares one
+snapshot before and one after — and per-step records come back inside the one response.
+
+It changes the shape of the execution model rather than patching it: the run loop would
+stop driving steps one at a time, and per-step error attribution, timing and the repair
+loop all have to be re-derived from the batched response. A decision worth making
+deliberately, which is why it was not started here.
 
 ---
 
