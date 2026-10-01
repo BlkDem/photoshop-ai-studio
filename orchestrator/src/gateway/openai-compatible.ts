@@ -1,4 +1,5 @@
 import type { DocumentSnapshot, ToolMeta } from '@photoshop-ai-studio/shared';
+import { OPERATIONS, TOOL_META_MAP } from '@photoshop-ai-studio/shared';
 import {
   ModelUnavailableError,
   SYSTEM_PREAMBLE,
@@ -182,7 +183,11 @@ export function plannerSystemPrompt(tools: readonly ToolMeta[]): string {
       const flags = [t.destructive ? 'DESTRUCTIVE' : null, t.requiresConfirmation ? 'needs-confirmation' : null]
         .filter(Boolean)
         .join(', ');
-      return `- ${t.tool}${flags ? ` [${flags}]` : ''}: ${t.description}`;
+      const params = renderParamShape(t.tool);
+      return [
+        `- ${t.tool}${flags ? ` [${flags}]` : ''}: ${t.description}`,
+        ...(params ? [`    params: ${params}`] : []),
+      ].join('\n');
     })
     .join('\n');
 
@@ -212,8 +217,114 @@ export function plannerSystemPrompt(tools: readonly ToolMeta[]): string {
     '- Do not include `photoshop.get_document` / `get_layers` as steps: the orchestrator already fetched the state.',
     '- `expect` entries are checked against a fresh snapshot after the plan finishes. Use kinds:',
     '  layer_exists | layer_absent | layer_property | document_property | layer_count | file_exists | custom.',
-    '- `photoshop.duplicate_document` must come first when you are deriving a variant of the current document.',
-].join('\n');
+'- `photoshop.duplicate_document` must come first when you are deriving a variant of the current document.',
+    '- The `params:` line under each tool is the exact accepted shape. An argument that is an object',
+    '  there must be passed as a nested object, never as a string.',
+    '- An argument marked `?` is optional: omit the key entirely when you do not have a value for it.',
+    '  Do not pass `null` for an omitted argument — `move_layer` with only `x` set must omit `y`,',
+    '  because `{"x": 10, "y": null}` is rejected while `{"x": 10}` is accepted.',
+  ].join('\n');
+}
+
+/**
+ * Renders a tool's parameter shape compactly enough to sit in a prompt.
+ *
+ * The planner was previously given only each tool's description, so it invented
+ * the shape of anything nested and got it wrong in ways the validator then
+ * rejected outright: `place_image` received `fit` as the string "820" where the
+ * schema wants `{"height": 820}`. The plan died on a shape mismatch rather than
+ * on anything about Photoshop, and the message the user saw
+ * (`Step arguments for photoshop.place_image are invalid`) gave no hint which
+ * argument was wrong or how.
+ *
+ * Zod v4 exposes the shape through `_def`, so this walks it rather than
+ * shipping a second hand-written description that could drift from the schema
+ * the validator actually enforces. Optional keys are marked, and defaults are
+ * shown so a model does not invent one where none exists.
+ */
+function renderParamShape(tool: string): string {
+  const meta = TOOL_META_MAP[tool];
+  if (!meta) return '';
+  const schema = OPERATIONS[meta.op]?.params as unknown;
+  const def = schemaDef(schema) as ZodDef | undefined;
+  // A tool's params are a ZodObject, whose def holds `{type, shape}` — the keys
+  // to render are in that `shape`, not on the def itself.
+  const shape = def?.shape as Record<string, unknown> | undefined;
+  if (!shape || typeof shape !== 'object') return '';
+  return Object.entries(shape)
+    .map(([key, value]) => `${key}${isOptional(value) ? '?' : ''}: ${describeParamType(value)}`)
+    .join(', ');
+}
+
+type ZodDef = {
+  type?: string;
+  innerType?: unknown;
+  shape?: Record<string, unknown>;
+  values?: unknown[];
+  entries?: unknown;
+  options?: unknown[];
+  element?: unknown;
+  valueType?: unknown;
+  value?: unknown;
+};
+
+function schemaDef(schema: unknown): unknown {
+  if (!schema || typeof schema !== 'object') return schema;
+  // Zod v4 exposes the parsed schema on `def`; `_def` is the v3 field and is
+  // absent here, so reading only `_def` silently yields an empty shape.
+  const parsed = schema as { def?: ZodDef; _def?: ZodDef };
+  return parsed.def ?? parsed._def ?? schema;
+}
+
+function isOptional(schema: unknown): boolean {
+  const def = schemaDef(schema) as ZodDef | undefined;
+  // A defaulted or optional field is one the planner may omit entirely.
+  return def?.type === 'optional' || def?.type === 'default';
+}
+
+function describeParamType(schema: unknown): string {
+  const def = schemaDef(schema) as ZodDef | undefined;
+  if (!def) return 'unknown';
+
+  // Unwrap the transparent wrappers so `ZodOptional<ZodObject>` reads as an object.
+  if (def.type === 'optional' || def.type === 'default') {
+    return describeParamType(def.innerType);
+  }
+
+  switch (def.type) {
+    case 'object': {
+      const shape = (def.shape ?? {}) as Record<string, unknown>;
+      const inner = Object.entries(shape)
+        .map(([key, value]) => `${key}${isOptional(value) ? '?' : ''}: ${describeParamType(value)}`)
+        .join(', ');
+      return `{${inner}}`;
+    }
+    case 'array':
+      return `${describeParamType(def.element ?? def.valueType)}[]`;
+    case 'enum': {
+      const values = (def.values ?? (def.entries ? Object.values(def.entries as Record<string, unknown>) : [])).map((v) =>
+        JSON.stringify(v),
+      );
+      return values.length ? values.join(' | ') : 'string';
+    }
+    case 'literal':
+      return JSON.stringify(def.value) ?? 'string';
+    case 'number':
+      return 'number';
+    case 'boolean':
+      return 'boolean';
+    case 'string':
+      return 'string';
+    case 'record':
+      return 'object';
+    case 'union': {
+      const options = (def.options ?? []) as unknown[];
+      const rendered = options.map((o) => describeParamType(o)).filter((t) => t !== 'unknown');
+      return rendered.length ? rendered.join(' | ') : 'object';
+    }
+    default:
+      return def.type ?? 'unknown';
+  }
 }
 
 export function plannerUserPrompt(request: PlanRequest): string {

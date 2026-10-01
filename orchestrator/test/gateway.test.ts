@@ -101,6 +101,24 @@ describe('prompt construction', () => {
     expect(prompt).toContain('photoshop.delete_layer [DESTRUCTIVE, needs-confirmation]');
   });
 
+  it('gives the planner the shape of every argument, not just the description', () => {
+    // The planner was shown `tool: description` and nothing else, so it invented
+    // the shape of anything nested. `place_image` came back with `fit` as the
+    // string "820" where the schema wants `{"height": 820}`, and the run died on
+    // INVALID_PARAMS with a message that never said which argument was wrong.
+    const prompt = plannerSystemPrompt(TOOL_META);
+
+    expect(prompt).toContain('params: documentId?: string, path: string, name?: string, fit?: {width?: number, height?: number');
+    // Nested objects must stay objects — that is the exact thing it got wrong.
+    expect(prompt).toContain('layer: {layerId?: number, layerName?: string}, group: {layerId?: number, layerName?: string}');
+    // Colour accepts both spellings, and the model needs to see both.
+    expect(prompt).toMatch(/color: \{r: number, g: number, b: number\} \| string/);
+
+    // A shape it could not resolve would send the model guessing again, so an
+    // unrendered type is a regression rather than a cosmetic gap.
+    expect(prompt, 'every parameter resolved to a concrete type').not.toContain('unknown');
+  });
+
   it('renders the document state as an indented tree', () => {
     const rendered = renderStateForPrompt(state);
     expect(rendered).toContain('document "banner.psd"');
