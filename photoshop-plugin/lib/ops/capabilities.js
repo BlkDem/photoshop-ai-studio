@@ -111,6 +111,7 @@ var UNSUPPORTED = {
   'layer.transform_descriptor': 'Every form of the `transform` descriptor is a no-op; the DOM methods work instead, on the active layer only.',
   'text.style_descriptor': '`textStyleRange`/`set` aimed at `_ref: \'textLayer\'` opens a modal dialog; `TextItem.characterStyle` works.',
   'color.solid_color': 'There is no factory: `app.solidColor` is absent and `new app.SolidColor(x)` ignores its argument.',
+  'document.history_bracket': 'suspendHistory groups only work inside one call. Held open across two requests it reports `opened: false` and rejects, so a multi-step run cannot be grouped into one undo step from the DOM; it needs the steps performed inside a single call.',
   'layer.fill': 'Not achievable on this build. Three routes were tried: `createPixelLayer({fill})` accepts the fill and leaves the layer 0x0; `selection.fill` does not exist; and the `fill` descriptor via batchPlay leaves it 0x0 in both of its spellings. A filled layer is therefore not offered as a tool.',
 };
 
