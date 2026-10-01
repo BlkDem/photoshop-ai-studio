@@ -66,15 +66,22 @@ h4 {
 
 /* ---------------------------------------------------------------- layout */
 
+/* A column, not a row template: the offline banner is rendered only while the
+   orchestrator is unreachable, so a fixed `grid-template-rows` counted a row
+   that usually had nothing in it. The children then landed one row higher than
+   intended and an empty 220px band was left under the app. Children size
+   themselves here, so a conditional one cannot shift the rest. */
 .app {
-  display: grid;
-  grid-template-rows: auto auto 1fr minmax(220px, 38vh);
+  display: flex;
+  flex-direction: column;
   height: 100%;
+  min-height: 0;
 }
 
 .app__main {
   display: grid;
   grid-template-columns: 280px 1fr 400px;
+  flex: 1 1 auto;
   min-height: 0;
   border-top: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
@@ -191,6 +198,20 @@ h4 {
   gap: 2px;
   padding: 8px 8px 0;
   border-bottom: 1px solid var(--line);
+}
+
+/* Four labelled tabs with counters do not fit a 280px rail, and the overflow
+   clipped "Tools" mid-word. Clipping the tab instead only moved the damage onto
+   the counters, so the row wraps onto a second line and everything stays
+   readable: a counter you cannot read is worse than one extra row of chrome. */
+.rail__tabs {
+  flex-wrap: wrap;
+  row-gap: 0;
+}
+
+.rail__tab {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .rail__tab,
@@ -738,7 +759,12 @@ h4 {
 .bottom {
   display: flex;
   flex-direction: column;
-  min-height: 0;
+  /* Takes its share of the height without starving the panes above it, and never
+     collapses to nothing: at 38vh with a 220px floor it stayed a usable strip
+     on short windows. */
+  flex: 0 0 auto;
+  height: 38vh;
+  min-height: 220px;
   background: var(--bg-raised);
 }
 
