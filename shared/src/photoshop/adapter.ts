@@ -5,6 +5,7 @@ import type { DocumentListResult } from './operations.js';
 import type { LayerInfo, LayerSelector, LayerPosition } from './layer.js';
 import type { CapabilitiesResult, ExportResult, ExportFormat, ParamsOf, PreviewResult, SampleColorResult } from './operations.js';
 import type { FontInfo, RgbColor, TextAlign, TextLayerInfo } from './text.js';
+import type { BrushInfo, ListBrushesResult, BrushStrokeResult } from './operations.js';
 /**
  * The Photoshop abstraction layer (brief §12).
  *
@@ -117,6 +118,11 @@ export interface PhotoshopAdapter {
   setTextPosition(sel: LayerSelector, x: number, y: number): Promise<TextLayerInfo>;
   setTextFontSize(sel: LayerSelector, fontSize: number): Promise<TextLayerInfo>;
   setTextColor(sel: LayerSelector, color: RgbColor): Promise<TextLayerInfo>;
+
+  // --- brushes -------------------------------------------------------------
+  listBrushes(params: ParamsOf<'list_brushes'>): Promise<ListBrushesResult>;
+  strokePath(params: ParamsOf<'stroke_path'>): Promise<BrushStrokeResult>;
+  paintStroke(params: ParamsOf<'paint_stroke'>): Promise<BrushStrokeResult>;
 
   // --- images --------------------------------------------------------------
   placeImage(params: ParamsOf<'place_image'>): Promise<LayerInfo>;

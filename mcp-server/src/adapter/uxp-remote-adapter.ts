@@ -330,6 +330,20 @@ export class UxpRemoteAdapter implements PhotoshopAdapter {
     return (await this.send('set_text_color', sel)) as ResultOf<'set_text_color'>;
   }
 
+  // --- brushes ---------------------------------------------------------------
+
+  async listBrushes(params: ParamsOf<'list_brushes'>): Promise<ResultOf<'list_brushes'>> {
+    return (await this.send('list_brushes', params)) as ResultOf<'list_brushes'>;
+  }
+
+  async strokePath(params: ParamsOf<'stroke_path'>): Promise<ResultOf<'stroke_path'>> {
+    return (await this.send('stroke_path', params)) as ResultOf<'stroke_path'>;
+  }
+
+  async paintStroke(params: ParamsOf<'paint_stroke'>): Promise<ResultOf<'paint_stroke'>> {
+    return (await this.send('paint_stroke', params)) as ResultOf<'paint_stroke'>;
+  }
+
   // --- images --------------------------------------------------------------
 
   async placeImage(params: ParamsOf<'place_image'>): Promise<ResultOf<'place_image'>> {

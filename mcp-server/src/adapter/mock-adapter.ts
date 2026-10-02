@@ -27,6 +27,9 @@ import {
   type SaveResult,
   type TextAlign,
   type TextLayerInfo,
+  type BrushInfo,
+  type ListBrushesResult,
+  type BrushStrokeResult,
 } from '@photoshop-ai-studio/shared';
 import { Workspace } from '../workspace.js';
 
@@ -746,6 +749,63 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
 
   async setTextColor(sel: LayerSelector, color: RgbColor): Promise<TextLayerInfo> {
     return this.updateTextLayer(sel, { color });
+  }
+
+  // --- brushes ---------------------------------------------------------------
+
+  async listBrushes(): Promise<ListBrushesResult> {
+    const brushes: BrushInfo[] = [
+      { name: 'Soft Round 21', size: 21 },
+      { name: 'Hard Round 19', size: 19 },
+      { name: 'Soft Round 46', size: 46 },
+      { name: 'Hard Round 9', size: 9 },
+      { name: 'Calligraphic 20', size: 20 },
+    ];
+    return { brushes, currentBrush: 'Soft Round 21' };
+  }
+
+  async strokePath(params: ParamsOf<'stroke_path'>): Promise<BrushStrokeResult> {
+    const doc = this.active();
+    // Create a layer for the stroke
+    const layer = this.addLayer(doc, {
+      name: 'Brush Stroke',
+      type: 'pixel',
+      x: 0,
+      y: 0,
+      width: doc.width,
+      height: doc.height,
+      opacity: params.opacity,
+      visible: true,
+    });
+    return {
+      success: true,
+      layerId: layer.id,
+      layerName: layer.name,
+      brushUsed: params.brushName || 'Soft Round 21',
+      brushSize: params.brushSize,
+    };
+  }
+
+  async paintStroke(params: ParamsOf<'paint_stroke'>): Promise<BrushStrokeResult> {
+    const doc = this.active();
+    // Create a layer for the stroke
+    const layer = this.addLayer(doc, {
+      name: 'Paint Stroke',
+      type: 'pixel',
+      x: 0,
+      y: 0,
+      width: doc.width,
+      height: doc.height,
+      opacity: params.opacity,
+      visible: true,
+    });
+    return {
+      success: true,
+      layerId: layer.id,
+      layerName: layer.name,
+      brushUsed: params.brushName || 'Soft Round 21',
+      brushSize: params.brushSize,
+    };
   }
 
   // --- images --------------------------------------------------------------

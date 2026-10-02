@@ -22,6 +22,7 @@ var textOps = require('./ops/text.js');
 var imageOps = require('./ops/images.js');
 var capabilityOps = require('./ops/capabilities.js');
 var filterOps = require('./ops/filters.js');
+var brushOps = require('./ops/brush.js');
 
 /** op name → (ctx) => Promise<result>. `ctx` is {params, config, documentId}. */
 var OPERATIONS = {
@@ -77,6 +78,11 @@ var OPERATIONS = {
   // images
   place_image: imageOps.place_image,
   resize_layer: imageOps.resize_layer,
+
+  // brushes
+  list_brushes: brushOps.list_brushes,
+  stroke_path: brushOps.stroke_path,
+  paint_stroke: brushOps.paint_stroke,
 
   // canvas
   resize_canvas: canvasOps.resize_canvas,
@@ -237,6 +243,9 @@ function commandNameFor(op) {
     export_jpg: 'Export JPEG',
     save_psd: 'Save PSD',
     render_preview: 'Render preview',
+    list_brushes: 'List brushes',
+    stroke_path: 'Stroke path',
+    paint_stroke: 'Paint stroke',
   };
   return 'AI Studio: ' + (names[op] || op);
 }

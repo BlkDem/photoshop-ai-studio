@@ -89,6 +89,11 @@ export const DISPATCH: OpDispatcher = {
   set_text_font_size: (a, p) => a.setTextFontSize(p, p.fontSize),
   set_text_color: (a, p) => a.setTextColor(p, normalizeColor(p.color)),
 
+  // --- brushes -------------------------------------------------------------
+  list_brushes: (a, p) => a.listBrushes(p),
+  stroke_path: (a, p) => a.strokePath(p),
+  paint_stroke: (a, p) => a.paintStroke(p),
+
   // --- images --------------------------------------------------------------
   place_image: (a, p) => a.placeImage(p),
   resize_layer: (a, p) => a.resizeLayer(p),

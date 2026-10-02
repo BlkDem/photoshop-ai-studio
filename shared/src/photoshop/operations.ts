@@ -88,10 +88,15 @@ export const OPERATION_NAMES = [
   'modify_selection',
   'set_layer_locking',
   'duplicate_layers',
+  'apply_image',
   // pixels
   'apply_image',
   // text support
   'list_fonts',
+  // brush operations
+  'list_brushes',
+  'stroke_path',
+  'paint_stroke',
   // studio support
   'render_preview',
 ] as const;
@@ -286,6 +291,84 @@ export const RgbInputSchema = z.union([
   RgbColorSchema,
   z.string().regex(/^#?[0-9a-fA-F]{6}$/, 'Expected "#rrggbb" or {r,g,b}'),
 ]);
+
+// ---------------------------------------------------------------------------
+// brush parameter pieces
+// ---------------------------------------------------------------------------
+
+/** A point in document pixels. */
+export const PointSchema = z.object({
+  x: z.number().int(),
+  y: z.number().int(),
+});
+
+/** A path segment for stroke_path. */
+export const PathSegmentSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('move'), point: PointSchema }),
+  z.object({ type: z.literal('line'), point: PointSchema }),
+  z.object({ type: z.literal('curve'), cp1: PointSchema, cp2: PointSchema, point: PointSchema }),
+]);
+
+/** Brush stroke parameters for stroke_path. */
+export const StrokePathParamsSchema = DocumentTargetSchema.extend({
+  /** Brush name (e.g. "Soft Round 21", "Hard Round 19"). Omit to use current brush. */
+  brushName: z.string().min(1).optional(),
+  /** Brush size in pixels. */
+  brushSize: z.number().int().positive().max(5000).optional(),
+  /** Stroke colour. */
+  color: RgbInputSchema.default({ r: 0, g: 0, b: 0 }),
+  /** Opacity 0-100. */
+  opacity: z.number().min(0).max(100).default(100),
+  /** Blend mode. */
+  blendMode: BlendModeSchema.optional(),
+  /** Path segments defining the stroke. */
+  path: z.array(PathSegmentSchema).min(1),
+  /** Simulate pressure (tapers ends). */
+  simulatePressure: z.boolean().default(false),
+});
+
+/** Brush stroke parameters for paint_stroke (freehand-style). */
+export const PaintStrokeParamsSchema = DocumentTargetSchema.extend({
+  /** Brush name (e.g. "Soft Round 21", "Hard Round 19"). Omit to use current brush. */
+  brushName: z.string().min(1).optional(),
+  /** Brush size in pixels. */
+  brushSize: z.number().int().positive().max(5000).optional(),
+  /** Stroke colour. */
+  color: RgbInputSchema.default({ r: 0, g: 0, b: 0 }),
+  /** Opacity 0-100. */
+  opacity: z.number().min(0).max(100).default(100),
+  /** Blend mode. */
+  blendMode: BlendModeSchema.optional(),
+  /** Array of points for the stroke. */
+  points: z.array(PointSchema).min(2),
+  /** Smooth the stroke (like Photoshop's smoothing). */
+  smoothing: z.number().int().min(0).max(100).default(0),
+});
+
+/** Brush info result. */
+export const BrushInfoSchema = z.object({
+  name: z.string(),
+  size: z.number().int().optional(),
+  // Additional properties may be present depending on the brush
+});
+export type BrushInfo = z.infer<typeof BrushInfoSchema>;
+
+/** Result of list_brushes. */
+export const ListBrushesResultSchema = z.object({
+  brushes: z.array(BrushInfoSchema),
+  currentBrush: z.string().nullable(),
+});
+export type ListBrushesResult = z.infer<typeof ListBrushesResultSchema>;
+
+/** Result of stroke_path / paint_stroke. */
+export const BrushStrokeResultSchema = z.object({
+  success: z.boolean(),
+  layerId: z.number().int().optional(),
+  layerName: z.string().optional(),
+  brushUsed: z.string().optional(),
+  brushSize: z.number().int().optional(),
+});
+export type BrushStrokeResult = z.infer<typeof BrushStrokeResultSchema>;
 
 // ---------------------------------------------------------------------------
 // the registry
@@ -910,6 +993,49 @@ export const OPERATIONS = {
       color: RgbInputSchema,
     }),
     result: TextLayerInfoSchema,
+  },
+
+  // ---------------------------------------------------------------- brushes
+  list_brushes: {
+    tool: 'photoshop.list_brushes',
+    title: 'List Brushes',
+    description:
+      'List the brushes available in Photoshop. Returns the brush names and the currently selected brush. ' +
+      'Call this before stroke_path or paint_stroke to pick a brush that exists on this machine.',
+    category: 'image',
+    destructive: false,
+    requiresConfirmation: false,
+    params: DocumentTargetSchema,
+    result: ListBrushesResultSchema,
+  },
+  stroke_path: {
+    tool: 'photoshop.stroke_path',
+    title: 'Stroke Path',
+    description:
+      'Stroke a vector path with a brush. Creates a path from the provided segments (move, line, curve) and ' +
+      'strokes it using Photoshop\'s brush engine. This produces real brush strokes with pressure simulation, ' +
+      'not filled shapes. The stroke is applied to a new layer. `brushName` must match an installed brush ' +
+      '(e.g. "Soft Round 21", "Hard Round 19"); omit to use the current brush. `simulatePressure` tapers ' +
+      'the stroke ends for a natural look.',
+    category: 'image',
+    destructive: false,
+    requiresConfirmation: false,
+    params: StrokePathParamsSchema,
+    result: BrushStrokeResultSchema,
+  },
+  paint_stroke: {
+    tool: 'photoshop.paint_stroke',
+    title: 'Paint Stroke',
+    description:
+      'Paint a freehand-style brush stroke through a series of points. Uses Photoshop\'s paint action ' +
+      'descriptor to simulate a brush stroke along the given points with smoothing. Creates a new layer ' +
+      'with the stroke. `brushName` must match an installed brush; omit to use the current brush. ' +
+      '`smoothing` (0-100) applies Photoshop\'s stroke smoothing for smoother curves.',
+    category: 'image',
+    destructive: false,
+    requiresConfirmation: false,
+    params: PaintStrokeParamsSchema,
+    result: BrushStrokeResultSchema,
   },
 
   // ---------------------------------------------------------------- images
