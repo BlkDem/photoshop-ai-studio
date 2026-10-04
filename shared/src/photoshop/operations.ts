@@ -346,7 +346,15 @@ const BrushStrokeParamsBase = DocumentTargetSchema.extend({
   brushSize: z.number().int().positive().max(5000).optional(),
   /** Stroke colour. */
   color: RgbInputSchema.default({ r: 0, g: 0, b: 0 }),
-  /** Opacity 0-100. */
+  /**
+   * Opacity of the stroke, 0-100.
+   *
+   * The rasterizer sweeps overlapping discs, so this is the alpha at the stroke's
+   * core and the ends fall off below it — the way a brush behaves, and the only
+   * reading a caller has. It is not the alpha of one disc: handing that to each
+   * of them composited a stroke asked at 25% into 76.5%, measured on Photoshop
+   * 26.11. Gradient bands do not overlap, so for `paint_gradient` this is exact.
+   */
   opacity: z.number().min(0).max(100).default(100),
   /** Blend mode the stroke is composited with. */
   blendMode: BlendModeSchema.optional(),
