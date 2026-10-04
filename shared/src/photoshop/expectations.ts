@@ -1,6 +1,6 @@
 import type { Expectation } from './diff.js';
 import type { LayerSelector } from './layer.js';
-import { OPERATIONS, type ParamsOf, type PhotoshopOpName } from './operations.js';
+import { DEFAULT_STROKE_LAYER_NAME, OPERATIONS, type ParamsOf, type PhotoshopOpName } from './operations.js';
 
 /**
  * Mechanical derivation of post-conditions from a single `(tool, params)` pair.
@@ -178,30 +178,43 @@ export function deriveExpectations<K extends PhotoshopOpName>(
     case 'export_document':
     case 'save_document':
     case 'save_psd':
-      return typeof p.path === 'string' ? [{ kind: 'file_exists', path: p.path }] : [];
+      // An empty path is not a file to look for, and accepting one produces a
+      // check that passes for the wrong reason or fails confusingly.
+      return typeof p.path === 'string' && p.path.length > 0
+        ? [{ kind: 'file_exists', path: String(p.path) }]
+        : [];
 
     case 'duplicate_layers':
       // Only checkable when the caller named the copy. Photoshop's own "… copy"
       // suffix is not knowable in advance, so an unnamed duplicate gets no
       // expectation rather than a guessed one; the result carries the real name and
       // the diff shows the new layer.
-      return typeof p.name === 'string'
-        ? [{ kind: 'layer_exists', layer: { layerName: p.name }, where: 'document' }]
+      return typeof p.name === 'string' && p.name.length > 0
+        ? [{ kind: 'layer_exists', layer: { layerName: String(p.name) }, where: 'document' }]
         : [];
 
-    case 'duplicate_document':
+    case 'duplicate_document': {
       // Only checkable when the caller named the copy; otherwise Photoshop appends
       // its own " copy" suffix and any expected name would be a guess.
-      return typeof p.name === 'string'
-        ? [{ kind: 'document_property', property: 'name', equals: p.name, tolerance: 0 }]
-        : [];
+      if (typeof p.name !== 'string' || p.name.length === 0) return [];
+      return [{ kind: 'document_property', property: 'name', equals: String(p.name), tolerance: 0 }];
+    }
 
     case 'move_layer_to_group': {
       // The group is named rather than addressed by id, because that is the only
       // thing a snapshot can confirm a layer ended up inside.
       const group = sel(p.group);
-      if (typeof group.layerName !== 'string') return [];
-      return [{ kind: 'layer_parent_named', layer: sel(p.layer), groupName: group.layerName }];
+      // Addressed by id, the resulting parentId is known up front; addressed by
+      // name it is only knowable once the group exists, so assert the name *and*
+      // that the thing it names really is a group.
+      if (group.layerId !== undefined) {
+        return [{ kind: 'layer_property', layer: sel(p.layer), property: 'parentId', equals: group.layerId, tolerance: 0 }];
+      }
+      if (typeof group.layerName !== 'string' || group.layerName.length === 0) return [];
+      return [
+        { kind: 'layer_parent_named', layer: sel(p.layer), groupName: group.layerName },
+        { kind: 'layer_property', layer: { layerName: group.layerName }, property: 'type', equals: 'group', tolerance: 0 },
+      ];
     }
 
     case 'convert_color_mode':
@@ -251,22 +264,6 @@ export function deriveExpectations<K extends PhotoshopOpName>(
         { kind: 'layer_exists', layer: { layerName: String(p.name) }, where: 'document' },
         { kind: 'layer_property', layer: { layerName: String(p.name) }, property: 'type', equals: 'group', tolerance: 0 },
       ];
-
-    case 'move_layer_to_group': {
-      const group = sel(p.group);
-      // Addressed by id, the resulting parentId is known up front; addressed by
-      // name it is only knowable once the group exists, so assert the name.
-      if (group.layerId !== undefined) {
-        return [{ kind: 'layer_property', layer: sel(p.layer), property: 'parentId', equals: group.layerId, tolerance: 0 }];
-      }
-      if (group.layerName !== undefined) {
-        return [
-          { kind: 'layer_parent_named', layer: sel(p.layer), groupName: group.layerName },
-          { kind: 'layer_property', layer: { layerName: group.layerName }, property: 'type', equals: 'group', tolerance: 0 },
-        ];
-      }
-      return [];
-    }
 
     case 'reorder_layer':
       return [{ kind: 'layer_exists', layer: sel(p.layer), where: 'document' }];
@@ -325,30 +322,36 @@ export function deriveExpectations<K extends PhotoshopOpName>(
         { kind: 'document_property', property: 'height', equals: Number(p.height), tolerance: 1 },
       ];
 
-    case 'duplicate_layers':
-      // Only checkable when the caller named the copy. Photoshop's own "… copy"
-      // suffix is not knowable in advance, so an unnamed duplicate gets no
-      // expectation rather than a guessed one; the result carries the real name and
-      // the diff shows the new layer.
-      return typeof p.name === 'string'
-        ? [{ kind: 'layer_exists', layer: { layerName: p.name }, where: 'document' }]
-        : [];
+    // --- brushes ------------------------------------------------------------
+    /*
+     * A stroke has no layer property to read back: the ink is pixels, and no
+     * snapshot field reports a pixel footprint. Deriving `layer_exists` for the
+     * default case — painting onto the active layer — would be a check that
+     * passes whether or not a single pixel moved, which is exactly the failure
+     * mode this module exists to rule out.
+     *
+     * So the pixel proof is taken where the pixels actually are: the adapter
+     * samples the canvas along the path before and after painting and reports
+     * `samplesChanged` out of `samplesChecked`, and a stroke that changed nothing
+     * fails at execution rather than passing verification. When the caller asked
+     * for a separate layer, though, a mechanical check *does* exist and is
+     * derived here — the layer must be there afterwards, which catches a stroke
+     * that errored before it ever painted.
+     */
 
-    case 'duplicate_document': {
-      if (p.name === undefined) return [];
-      return [{ kind: 'document_property', property: 'name', equals: String(p.name), tolerance: 0 }];
+    case 'stroke_path':
+    case 'paint_stroke': {
+      if (p.newLayer !== true) return [];
+      // The default name is included on purpose: a caller who asked for a new
+      // layer but not a name still gets a mechanical check, which catches a
+      // stroke that errored before it ever painted. Skipping it because
+      // `layerName` was absent would leave the common case unverified.
+      const layerName =
+        typeof p.layerName === 'string' && p.layerName.length > 0 ? p.layerName : DEFAULT_STROKE_LAYER_NAME;
+      return [{ kind: 'layer_exists', layer: { layerName }, where: 'document' }];
     }
 
     // --- export ------------------------------------------------------------
-    case 'export_png':
-    case 'export_jpg':
-    case 'export_document':
-    case 'save_psd':
-    case 'save_document':
-      return typeof p.path === 'string' && p.path.length > 0
-        ? [{ kind: 'file_exists', path: String(p.path) }]
-        : [];
-
     default:
       // Read-only tools and anything unmodelled: nothing to verify.
       void OPERATIONS[op];

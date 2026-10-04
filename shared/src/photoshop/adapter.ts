@@ -5,7 +5,7 @@ import type { DocumentListResult } from './operations.js';
 import type { LayerInfo, LayerSelector, LayerPosition } from './layer.js';
 import type { CapabilitiesResult, ExportResult, ExportFormat, ParamsOf, PreviewResult, SampleColorResult } from './operations.js';
 import type { FontInfo, RgbColor, TextAlign, TextLayerInfo } from './text.js';
-import type { BrushInfo, ListBrushesResult, BrushStrokeResult } from './operations.js';
+import type { ListBrushesResult, BrushStrokeResult } from './operations.js';
 /**
  * The Photoshop abstraction layer (brief §12).
  *

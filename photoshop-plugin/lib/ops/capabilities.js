@@ -51,6 +51,7 @@ var NOT_USABLE = {
   'layer.scale': 'unreachable: the layer it would scale has no area',
   'layer.fill': 'no working route found; `make content layer` hangs and selection.fill does not exist',
   'shape.create': 'no working route found; `make content layer` with a shape hangs',
+  'brush.engine': 'the brush engine itself is unreachable from UXP on this build — see UNSUPPORTED.brush.engine',
 };
 
 var VERIFIED = [
@@ -94,6 +95,9 @@ var VERIFIED = [
   'text.list_fonts',
   'layer.duplicate',
   'layer.apply_image',
+  'brush.rasterize',
+  'brush.sample_color',
+  'brush.selection_ellipse',
 ];
 
 /**
@@ -127,6 +131,9 @@ var NOT_ON_DOM = {
  * assumed, and each note records the failure that made it clear.
  */
 var UNSUPPORTED = {
+  'brush.engine': 'Photoshop\'s brush engine cannot be reached from UXP on this build, so `stroke_path` and `paint_stroke` rasterize the path with overlapping discs instead of driving the brush. Four routes were measured and all four fail: `core.executeScript` / `_executeScript` / `evalScript` / `doScript` are absent from `core`, `action` and `app` per an `Object.getOwnPropertyNames` dump; `core.performMenuCommand` cannot resolve a command symbol because `constants.MenuCommand` exposes no members here, so every spelling returns `timeOut`; the `_obj: \'stroke\'` batchPlay descriptor hangs because a descriptor without `strokeStyle`/`paintStyle` leaves Photoshop waiting on a dialog a modal scope cannot dismiss; and `_obj: \'paint\'` is rejected as "command unavailable". ExtendScript\'s `PathItem.stroke()` is a real brush and does work from a .jsx file driven over COM — see `scripts/brush-firework.jsx` — but that route is outside the plugin.',
+  'brush.list': 'No brush collection is reachable: neither `app.brushes` nor `document.brushes` exists on this build. `list_brushes` reports `available: false` with a reason instead of inventing names. A brush *name* therefore cannot change a stroke — strokes are discs of the diameter in `brushSize`.',
+  'brush.tip': 'Stroke width comes from `brushSize` alone. Tip shape, hardness, spacing, flow and jitter are not modelled, so two brushes of the same diameter rasterize identically.',
   'document.crop': 'Every form of the `crop` descriptor is refused; ExtendScript performs the same crop through COM.',
   'layer.transform_descriptor': 'Every form of the `transform` descriptor is a no-op; the DOM methods work instead, on the active layer only.',
   'text.style_descriptor': '`textStyleRange`/`set` aimed at `_ref: \'textLayer\'` opens a modal dialog; `TextItem.characterStyle` works.',
@@ -186,7 +193,6 @@ function readApiSurface() {
     'layer.move': probe(layer, 'translate'),
     'layer.scale': probe(layer, 'scale'),
     'layer.rotate': probe(layer, 'rotate'),
-    'layer.flip': probe(layer, 'flipHorizontal'),
     'layer.blend_mode': probe(layer, 'blendMode'),
     'layer.fill_opacity': probe(layer, 'fillOpacity'),
     'layer.mask': probe(layer, 'createMask') || probe(doc, 'createLayerMask'),
@@ -200,6 +206,12 @@ function readApiSurface() {
     'selection.deselect': probe(doc, 'selection.deselect'),
     'selection.invert': probe(doc, 'selection.inverse'),
     'selection.feather': probe(doc, 'selection.feather'),
+    'selection.select_ellipse': probe(doc, 'selection.selectEllipse'),
+
+    // --- brushes, probed rather than assumed ---
+    'app.brushes': probe(photoshop.app, 'brushes'),
+    'document.brushes': probe(doc, 'brushes'),
+    'brush.engine': probe(photoshop.core, 'executeScript'),
 
     // --- document finishing, found by enumerating the DOM ---
     'document.trim': probe(doc, 'trim'),
@@ -224,7 +236,6 @@ function readApiSurface() {
     // --- layer surface, likewise ---
     'layer.rasterize': probe(layer, 'rasterize'),
     'layer.flip': probe(layer, 'flip'),
-    'layer.rotate': probe(layer, 'rotate'),
     'layer.skew': probe(layer, 'skew'),
     'layer.apply_image': probe(layer, 'applyImage'),
     'layer.merge': probe(layer, 'merge'),
@@ -292,12 +303,9 @@ function readApiSurface() {
     'selection.fill': probe(doc.selection, 'fill'),
     'selection.select_all_probe': probe(doc.selection, 'selectAll'),
     'document.create_pixel_layer_fill': probe(doc, 'createPixelLayer'),
-    'selection.select_all': probe(doc.selection, 'selectAll'),
-    'selection.deselect': probe(doc.selection, 'deselect'),
     'selection.inverse': probe(doc.selection, 'inverse'),
 
     // --- locking: the flags are separate from the single `layer.locked` ------
-    'layer.set_locking': probe(layer, 'setLocking'),
     'layer.locked_transparency': probe(layer, 'lockedTransparency'),
     'layer.locked_position': probe(layer, 'lockedPosition'),
     'layer.locked_all': probe(layer, 'locked'),
@@ -315,9 +323,6 @@ function readApiSurface() {
     'color.profiles': probe(app, 'getColorProfiles'),
     'app.fonts': probe(app, 'fonts'),
     'document.pixel_layer': probe(doc, 'createPixelLayer'),
-    'document.reveal_all': probe(doc, 'revealAll'),
-    'document.suspend_history': probe(doc, 'suspendHistory'),
-    'layer.apply_image': probe(layer, 'applyImage'),
     'layer.duplicate_dom': probe(layer, 'duplicate'),
     'app.preferences': probe(app, 'preferences'),
     'app.convert_units': probe(app, 'convertUnits'),

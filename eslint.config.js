@@ -25,6 +25,11 @@ export default tseslint.config(
       'workspace/**',
       'data/**',
       '.eslintcache',
+      // Agent scratch worktrees are full copies of this repo checked out inside
+      // it. Linting them reports the same file twice and buries real errors in
+      // hundreds of stale ones, so `npm run lint` has to skip them.
+      '.kilo/**',
+      '**/.kilo/**',
     ],
   },
 

@@ -509,12 +509,14 @@ const NOT_DERIVABLE: Record<string, string> = {
   merge_visible_layers: 'the layer count drops by an unknown amount, depending on grouping',
   close_document: 'the check would be that the document is gone, which no property can express',
   set_layer_locking: 'setLocking is accepted but no flag is readable back: layer.locked stays false either way',
+  stroke_path: 'the ink is pixels and no snapshot field reports a pixel footprint; the adapter samples the canvas along the path instead, so the proof happens at execution',
+  paint_stroke: 'the ink is pixels and no snapshot field reports a pixel footprint; the adapter samples the canvas along the path instead, so the proof happens at execution',
 };
 
 /** Read-only tools: there is no post-condition because nothing changed. */
 const READ_ONLY = new Set([
   'get_document', 'get_document_info', 'get_layers', 'get_layer', 'get_text_layer', 'get_documents',
-  'get_capabilities', 'render_preview', 'sample_color', 'list_fonts',
+  'get_capabilities', 'render_preview', 'sample_color', 'list_fonts', 'list_brushes',
 ]);
 
 describe('every mutating tool has a mechanical post-condition', () => {
@@ -617,7 +619,7 @@ describe('every mutating tool has a mechanical post-condition', () => {
     expect(deriveExpectations('modify_selection', { action: 'deselect' } as never)[0]).toMatchObject({ equals: false });
   });
 
-  it('gives the three content-dependent tools no invented check', () => {
+  it('gives every tool with no derivable post-condition no invented one', () => {
     for (const [op, reason] of Object.entries(NOT_DERIVABLE)) {
       expect(deriveExpectations(op as never, {} as never), `${op}: ${reason}`).toEqual([]);
     }

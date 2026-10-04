@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import {
   UNKNOWN_CONNECTION,
   StudioException,
+  DEFAULT_STROKE_LAYER_NAME,
   normalizeColor,
   type AdapterConnection,
   type AdapterTarget,
@@ -27,11 +28,11 @@ import {
   type SaveResult,
   type TextAlign,
   type TextLayerInfo,
-  type BrushInfo,
   type ListBrushesResult,
   type BrushStrokeResult,
 } from '@photoshop-ai-studio/shared';
 import { Workspace } from '../workspace.js';
+import { flattenSegments, rasterizeStamps, type FlatPath } from './stroke-geometry.js';
 
 /** The capability ids the plugin reports; kept here so the two stay comparable. */
 const MOCK_CAPABILITIES = [
@@ -94,6 +95,27 @@ interface MockDocument {
   nextLayerId: number;
 }
 
+/**
+ * One disc of a rasterized stroke, kept on the layer so the mock's own reads
+ * agree with its own writes.
+ *
+ * The mock has no raster — `sampleColor` has always synthesised a value — but
+ * that stops being acceptable for strokes: a plan that draws a line and is then
+ * verified by sampling the canvas would be checked against a gradient that has
+ * nothing to do with the line. Recording the geometry the stroke was drawn with
+ * lets `sampleColor` report the stroke colour where there is ink, and lets
+ * `renderPreview` actually show the stroke.
+ */
+interface MockStroke {
+  layerId: number;
+  color: RgbColor;
+  opacity: number;
+  stamps: Array<{ x: number; y: number; r: number }>;
+}
+
+/** Cap mirroring the plugin's, so the mock and the plugin fail the same way. */
+const MAX_MOCK_STAMPS = 4000;
+
 export interface MockAdapterOptions {
   workspace: Workspace;
   /** Seed the §29 demo document (banner.psd, 1920×1080). Defaults to true. */
@@ -104,6 +126,8 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
   readonly target: AdapterTarget = { kind: 'mock', label: 'Mock Photoshop (in-memory)' };
 
   private readonly documents = new Map<string, MockDocument>();
+  /** Strokes drawn in this session, in paint order. */
+  private readonly strokes: MockStroke[] = [];
   private activeId: string | null = null;
   private connected = true;
   private lastLatencyMs: number | null = null;
@@ -433,8 +457,12 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
         `Cannot sample at (${params.x},${params.y}): the canvas is ${doc.width}x${doc.height}.`,
       );
     }
-    // Deterministic stand-in for reading a pixel; the mock has no raster.
-    const color = { r: (params.x * 7) % 256, g: (params.y * 5) % 256, b: 128 };
+    // Strokes are real geometry in the mock, so a sample that lands on one
+    // reports the stroke's colour. Everything else keeps the deterministic
+    // stand-in it has always used, since the mock still has no raster for
+    // placed artwork.
+    const inked = this.colorAt(params.x, params.y);
+    const color = inked ?? { r: (params.x * 7) % 256, g: (params.y * 5) % 256, b: 128 };
     return { color, hex: `#${[color.r, color.g, color.b].map((c) => c.toString(16).padStart(2, '0')).join('')}` };
   }
 
@@ -753,59 +781,138 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
 
   // --- brushes ---------------------------------------------------------------
 
+  /**
+   * The mock has no brush engine, and neither does any UXP host this project
+   * has run against, so it answers the way the plugin does: `available: false`
+   * with the reason. Returning a made-up list here would let a plan be tested
+   * against brush names that never existed and then behave differently in
+   * Photoshop, which is the one thing a mock must not do.
+   */
   async listBrushes(): Promise<ListBrushesResult> {
-    const brushes: BrushInfo[] = [
-      { name: 'Soft Round 21', size: 21 },
-      { name: 'Hard Round 19', size: 19 },
-      { name: 'Soft Round 46', size: 46 },
-      { name: 'Hard Round 9', size: 9 },
-      { name: 'Calligraphic 20', size: 20 },
-    ];
-    return { brushes, currentBrush: 'Soft Round 21' };
+    return {
+      available: false,
+      brushes: [],
+      currentBrush: null,
+      source: 'unavailable',
+      reason:
+        'The mock has no brush engine, matching the UXP plugin. brushSize is still honoured: ' +
+        'strokes are rasterized as discs of that diameter.',
+    };
   }
 
   async strokePath(params: ParamsOf<'stroke_path'>): Promise<BrushStrokeResult> {
-    const doc = this.active();
-    // Create a layer for the stroke
-    const layer = this.addLayer(doc, {
-      name: 'Brush Stroke',
-      type: 'pixel',
-      x: 0,
-      y: 0,
-      width: doc.width,
-      height: doc.height,
-      opacity: params.opacity,
-      visible: true,
-    });
-    return {
-      success: true,
-      layerId: layer.id,
-      layerName: layer.name,
-      brushUsed: params.brushName || 'Soft Round 21',
-      brushSize: params.brushSize,
-    };
+    return this.drawStroke(params, flattenSegments(params.path));
   }
 
   async paintStroke(params: ParamsOf<'paint_stroke'>): Promise<BrushStrokeResult> {
-    const doc = this.active();
-    // Create a layer for the stroke
-    const layer = this.addLayer(doc, {
-      name: 'Paint Stroke',
-      type: 'pixel',
-      x: 0,
-      y: 0,
-      width: doc.width,
-      height: doc.height,
-      opacity: params.opacity,
-      visible: true,
+    // A freehand point list is a single subpath by construction: every point
+    // after the first extends the same mark.
+    return this.drawStroke(params, {
+      points: params.points.map((p) => ({ x: p.x, y: p.y })),
+      starts: params.points.length > 0 ? [0] : [],
     });
+  }
+
+  /**
+   * Rasterizes a stroke into the mock's stroke record and reports the same
+   * verification the plugin does, so a plan that draws and then samples the
+   * canvas behaves identically here and in Photoshop.
+   *
+   * The geometry is recomputed rather than imported from the plugin: the plugin
+   * is deliberately build-free CommonJS and `shared` is not allowed to import it.
+   * The helpers below are therefore mirrors of `stroke-geometry.js`, and a
+   * behavioural test runs the same path through both to keep them honest.
+   */
+  private drawStroke(
+    params: ParamsOf<'stroke_path'> | ParamsOf<'paint_stroke'>,
+    path: FlatPath,
+  ): BrushStrokeResult {
+    const doc = this.active();
+    const radius = Math.max(0.5, (params.brushSize ?? 5) / 2);
+    const smoothing = 'smoothing' in params ? params.smoothing : 0;
+    const simulatePressure = 'simulatePressure' in params && params.simulatePressure === true;
+
+    const stamps = rasterizeStamps(path, radius, smoothing, simulatePressure, MAX_MOCK_STAMPS);
+    if (stamps.length === 0) {
+      throw new StudioException('INVALID_PARAMS', 'The stroke had no usable points.');
+    }
+
+    const layer = params.newLayer === true
+      ? this.addLayer(doc, {
+          name: params.layerName ?? DEFAULT_STROKE_LAYER_NAME,
+          type: 'pixel',
+          x: 0,
+          y: 0,
+          width: doc.width,
+          height: doc.height,
+          opacity: params.opacity,
+          visible: true,
+        })
+      : this.activeLayer(doc);
+
+    this.strokes.push({
+      layerId: layer.id,
+      color: normalizeColor(params.color),
+      opacity: params.opacity,
+      stamps,
+    });
+    doc.saved = false;
+
+    const onCanvas = stamps.filter((s) => s.x >= 0 && s.y >= 0 && s.x < doc.width && s.y < doc.height).length;
     return {
       success: true,
       layerId: layer.id,
       layerName: layer.name,
-      brushUsed: params.brushName || 'Soft Round 21',
-      brushSize: params.brushSize,
+      brushSize: params.brushSize ?? 5,
+      blendMode: params.blendMode,
+      methodUsed: 'rasterized-stroke',
+      stampsPainted: stamps.length,
+      samplesChecked: onCanvas,
+      samplesChanged: onCanvas,
+      // Every stamp the mock paints does change the pixels under it, but when
+      // nothing landed on the canvas there is no evidence to report — `null`
+      // for "unproven" rather than `false`, which the plugin reserves for a
+      // stroke that provably changed nothing.
+      verified: onCanvas > 0 ? true : null,
+      truncated: stamps.length >= MAX_MOCK_STAMPS,
     };
+  }
+
+  /**
+   * Strokes to paint into a preview, scaled with the rest of the document and
+   * filtered to layers that are still visible.
+   *
+   * Without this the mock drew strokes that no preview ever showed, which made
+   * "the agent painted something" unverifiable by eye in the one environment
+   * where a plan gets rehearsed.
+   */
+  private previewStrokes(doc: MockDocument, scale: number): Array<{ x: number; y: number; r: number; color: RgbColor; opacity: number }> {
+    const hidden = new Set(doc.layers.filter((l) => !l.visible).map((l) => l.id));
+    return this.strokes
+      .filter((stroke) => !hidden.has(stroke.layerId) && stroke.opacity > 0)
+      .flatMap((stroke) =>
+        stroke.stamps.map((stamp) => ({
+          x: stamp.x * scale,
+          y: stamp.y * scale,
+          r: Math.max(0.5, stamp.r * scale),
+          color: stroke.color,
+          opacity: stroke.opacity,
+        })),
+      );
+  }
+
+  /** The colour a `sample_color` read should report, honouring drawn strokes. */
+  private colorAt(x: number, y: number): RgbColor | null {
+    for (let i = this.strokes.length - 1; i >= 0; i -= 1) {
+      const stroke = this.strokes[i]!;
+      if (stroke.opacity <= 0) continue;
+      for (const stamp of stroke.stamps) {
+        const dx = x - stamp.x;
+        const dy = y - stamp.y;
+        if (dx * dx + dy * dy <= stamp.r * stamp.r) return stroke.color;
+      }
+    }
+    return null;
   }
 
   // --- images --------------------------------------------------------------
@@ -913,7 +1020,7 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
     const width = Math.max(1, Math.round(doc.width * scale));
     const height = Math.max(1, Math.round(doc.height * scale));
     mkdirSync(dirname(path), { recursive: true });
-    const png = createSolidPng(width, height, { r: 32, g: 34, b: 40 }, doc.layers.filter((l) => l.visible).map((l) => ({ ...l, scale })));
+    const png = createSolidPng(width, height, { r: 32, g: 34, b: 40 }, doc.layers.filter((l) => l.visible).map((l) => ({ ...l, scale })), this.previewStrokes(doc, scale));
     writeFileSync(path, png);
     return { path, format: 'png', bytes: png.byteLength, overwritten: params.overwrite };
   }
@@ -956,7 +1063,7 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
     const scale = Math.min(1, params.maxWidth / Math.max(1, doc.width));
     const width = Math.max(1, Math.round(doc.width * scale));
     const height = Math.max(1, Math.round(doc.height * scale));
-    const png = createSolidPng(width, height, { r: 32, g: 34, b: 40 }, doc.layers.filter((l) => l.visible).map((l) => ({ ...l, scale })));
+    const png = createSolidPng(width, height, { r: 32, g: 34, b: 40 }, doc.layers.filter((l) => l.visible).map((l) => ({ ...l, scale })), this.previewStrokes(doc, scale));
     return { mimeType: 'image/png', base64: png.toString('base64'), width, height };
   }
 
@@ -978,6 +1085,24 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
     };
     this.documents.set(doc.id, doc);
     return doc;
+  }
+
+  /**
+   * The layer a stroke lands on when `newLayer` is false: the topmost layer in
+   * stacking order, which is what Photoshop paints onto.
+   */
+  private activeLayer(doc: MockDocument): LayerInfo {
+    const top = doc.layers[doc.layers.length - 1];
+    if (top) return top;
+    return this.addLayer(doc, {
+      name: 'Layer 1',
+      type: 'pixel',
+      x: 0,
+      y: 0,
+      width: doc.width,
+      height: doc.height,
+      visible: true,
+    });
   }
 
   private addLayer(
@@ -1275,12 +1400,20 @@ function chunk(type: string, data: Buffer): Buffer {
   return Buffer.concat([length, typeAndData, crc]);
 }
 
-/** Solid background with faint horizontal bands where visible layers sit. */
+/**
+ * Solid background with faint horizontal bands where visible layers sit, and
+ * drawn strokes painted in their own colour on top.
+ *
+ * The strokes are real geometry rather than a hint: the mock records the discs
+ * it rasterized, so the preview shows the same mark that `sample_color` will
+ * report and that `stroke_path` claims it painted.
+ */
 function createSolidPng(
   width: number,
   height: number,
   background: RgbColor,
   layers: ReadonlyArray<LayerInfo & { scale: number }>,
+  strokes: ReadonlyArray<{ x: number; y: number; r: number; color: RgbColor; opacity: number }> = [],
 ): Buffer {
   const bands = layers
     .filter((l) => l.width > 0 && l.height > 0)
@@ -1302,6 +1435,18 @@ function createSolidPng(
       let r = background.r;
       let g = background.g;
       let b = background.b;
+      // Strokes are painted before the layer bands, because a stroke belongs to
+      // a layer and the bands are what stand in for that layer's artwork.
+      for (const stroke of strokes) {
+        const dx = x + 0.5 - stroke.x;
+        const dy = y + 0.5 - stroke.y;
+        if (dx * dx + dy * dy <= stroke.r * stroke.r) {
+          const a = stroke.opacity / 100;
+          r = Math.round(r * (1 - a) + stroke.color.r * a);
+          g = Math.round(g * (1 - a) + stroke.color.g * a);
+          b = Math.round(b * (1 - a) + stroke.color.b * a);
+        }
+      }
       for (const band of bands) {
         if (y >= band.y0 && y < band.y1 && x >= band.x0 && x < band.x1) {
           const a = band.alpha / 255;

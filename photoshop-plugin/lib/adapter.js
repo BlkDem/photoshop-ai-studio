@@ -108,6 +108,7 @@ var READ_ONLY = {
   get_layers: true,
   get_layer: true,
   get_text_layer: true,
+  list_brushes: true,
 };
 
 /** The advertised tool surface: exactly what the shared registry declares. */

@@ -1,10 +1,11 @@
-import { readFileSync, statSync, readdirSync } from 'node:fs';
-import { dirname, extname, join, resolve as resolvePath } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { readFileSync } from 'node:fs';
+import { dirname, join, resolve as resolvePath } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
 import { OPERATIONS, OP_NAMES } from '@photoshop-ai-studio/shared';
+
+import { loadPluginFile, pluginFiles, pluginRoot, photoshopStub, STUBS, uxpStub, type Stub } from './harness.js';
 
 /**
  * Plugin load test.
@@ -16,140 +17,13 @@ import { OPERATIONS, OP_NAMES } from '@photoshop-ai-studio/shared';
  * validates syntax, so it cannot see a missing function, a bad reference, or a
  * throw at module scope.
  *
- * This harness loads every plugin file with `photoshop` and `uxp` stubbed,
- * compiling each one as CommonJS explicitly (the repository root is an ES module
- * package, so `require()` cannot be used directly). It is the check that would
- * have caught the real bugs found against Photoshop 26.11.
+ * This harness (see `harness.ts`) loads every plugin file with `photoshop` and
+ * `uxp` stubbed, compiling each one as CommonJS explicitly. It is the check that
+ * would have caught the real bugs found against Photoshop 26.11.
  */
 
-const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
-
-interface Stub {
-  /** Property reads that return a callable stub instead of undefined. */
-  [key: string]: unknown;
-}
-
-function photoshopStub(): Stub {
-  const layer = {
-    id: 1,
-    name: 'Layer',
-    kind: 'pixel',
-    visible: true,
-    opacity: 100,
-    bounds: { left: 0, top: 0, right: 10, bottom: 10 },
-    layers: [],
-    textItem: { contents: 'x', characterStyle: { size: 12, font: 'F' }, paragraphStyle: { alignment: 'left' } },
-    delete() {},
-    translate() {},
-    scale() {},
-    move() {},
-  };
-  const document = {
-    id: 1,
-    name: 'stub.psd',
-    width: 100,
-    height: 100,
-    resolution: 72,
-    mode: 'RGB',
-    layers: [layer],
-    backgroundLayer: layer,
-    activeLayer: layer,
-    saved: true,
-    zoom: 100,
-    createLayer: () => layer,
-    createLayerGroup: () => layer,
-    createTextLayer: () => layer,
-    // Async on purpose: the DOM returns a Promise, and a synchronous stub
-    // hides the bug where `.name` is read off the promise instead of the document.
-    duplicate: async () => document,
-    resizeCanvas: async () => undefined,
-    saveAs: { png: async () => undefined, jpg: async () => undefined, psd: async () => undefined },
-  };
-  return {
-    app: { activeDocument: document, documents: [document], foregroundColor: {}, open: async () => document },
-    action: { batchPlay: async () => [{}], batchPlaySync: () => [{}] },
-    core: {
-      executeAsModal: async (fn: () => unknown) => fn(),
-      getLayerTreeSync: () => ({ list: [] }),
-    },
-    // Values are the kind *names*, matching what Photoshop 26.11 actually exposes.
-    constants: {
-      LayerKind: { NORMAL: 'pixel', TEXT: 'text', SMARTOBJECT: 'smartObject', SOLIDFILL: 'solidColor' },
-      ElementPlacement: { PLACEINSIDE: 'placeInside' },
-    },
-  };
-}
-
-function uxpStub(urls: string[] = []): Stub {
-  const entry = { read: async () => '{}', write: async () => undefined, nativePath: '/tmp/x' };
-  return {
-    entrypoints: { setup: () => undefined },
-    storage: {
-      localFileSystem: {
-        getPluginFolder: async () => ({ getEntry: () => entry, createFile: () => entry, nativePath: '/tmp' }),
-        getTemporaryFolder: async () => ({ nativePath: '/tmp', createFile: () => entry }),
-        createEntryWithUrl: async (url: string) => {
-          urls.push(url);
-          return entry;
-        },
-        getEntryWithUrl: async () => entry,
-        createSessionToken: () => 'token',
-      },
-      formats: { utf8: 'utf8', binary: 'binary' },
-    },
-    versions: { uxp: 'test' },
-    hostInformation: { appVersion: '99.0', appName: 'Photoshop' },
-  };
-}
-
-const STUBS: Record<string, Stub> = { photoshop: photoshopStub(), uxp: uxpStub() };
-
-/** Every plugin `.js` file, in dependency order. */
-function pluginFiles(root = pluginRoot): string[] {
-  const out: string[] = [];
-  const walk = (dir: string): void => {
-    for (const entry of readdirSync(join(root, dir)).sort()) {
-      const relative = `${dir}/${entry}`;
-      if (statSync(join(root, relative)).isDirectory()) {
-        if (entry === 'test' || entry === 'icons') continue;
-        walk(relative);
-      } else if (extname(entry) === '.js') {
-        out.push(relative.replace(/^\.\//, ''));
-      }
-    }
-  };
-  walk('.');
-  return out;
-}
-
-/**
- * Loads a plugin file as CommonJS with the host modules stubbed.
- *
- * `Module._compile` is not used: the nearest `package.json` to the plugin is the
- * repository root, which declares `"type": "module"`, so `require()` would hand
- * the file to the ESM loader. Wrapping the source explicitly keeps the plugin's
- * own CommonJS semantics, which is what Photoshop gives it.
- */
-function loadPluginFile(root: string, relative: string, uxpOverride?: Stub, photoshopOverride?: Stub): Record<string, unknown> {
-  const absolute = join(root, relative);
-  const source = readFileSync(absolute, 'utf8');
-  const module = { exports: {} as Record<string, unknown> };
-  const requireStub = (specifier: string): unknown => {
-    if (specifier === 'uxp') return uxpOverride ?? STUBS.uxp;
-    if (specifier === 'photoshop') return photoshopOverride ?? STUBS.photoshop;
-    if (STUBS[specifier]) return STUBS[specifier];
-    if (specifier.startsWith('.')) {
-      const target = resolvePath(dirname(absolute), specifier);
-      // Overrides must reach transitive requires too: `lib/ops/text.js` reads the
-      // layer through `lib/ps.js`, which captured the stub when *it* loaded.
-      return loadPluginFile(root, target.startsWith(root) ? target.slice(root.length + 1) : target, uxpOverride, photoshopOverride);
-    }
-    throw new Error(`the plugin may not require "${specifier}"`);
-  };
-  const factory = new Function('require', 'module', 'exports', '__filename', '__dirname', source);
-  factory(requireStub, module, module.exports, absolute, dirname(absolute));
-  return module.exports;
-}
+STUBS.photoshop = photoshopStub();
+STUBS.uxp = uxpStub();
 
 describe('UXP plugin loads', () => {
   const files = pluginFiles();
@@ -164,11 +38,11 @@ describe('UXP plugin loads', () => {
   it.each(files)('%s loads without a reference error', (relative) => {
     // A throw at module scope is silent inside Photoshop — the plugin simply never
     // connects — so this is the assertion that makes plugin edits safe to make.
-    expect(() => loadPluginFile(pluginRoot, relative), `${relative} failed to load`).not.toThrow();
+    expect(() => loadPluginFile(relative), `${relative} failed to load`).not.toThrow();
   });
 
   it('returns a real document reference from duplicate_document', async () => {
-    const adapter = loadPluginFile(pluginRoot, 'lib/ops/canvas.js') as {
+    const adapter = loadPluginFile('lib/ops/canvas.js') as {
       duplicate_document: (ctx: { params: Record<string, unknown>; config: Record<string, string> }) => Promise<unknown>;
     };
     const result = (await adapter.duplicate_document({
@@ -182,7 +56,7 @@ describe('UXP plugin loads', () => {
   });
 
   it('exposes every operation from the shared registry', () => {
-    const adapter = loadPluginFile(pluginRoot, 'lib/adapter.js') as { SUPPORTED: string[]; OPERATIONS: Record<string, unknown> };
+    const adapter = loadPluginFile('lib/adapter.js') as { SUPPORTED: string[]; OPERATIONS: Record<string, unknown> };
     // SUPPORTED is the advertised surface: it must cover the shared registry
     // exactly, with diagnostics deliberately absent, while every registered
     // operation — diagnostic or not — still resolves to a function.
@@ -208,7 +82,7 @@ describe('UXP plugin loads', () => {
       // Assert on the URL handed to UXP: that is the real observable, and it
       // is what failed on device.
       const urls: string[] = [];
-      const ps = loadPluginFile(pluginRoot, 'lib/ps.js', uxpStub(urls)) as {
+      const ps = loadPluginFile('lib/ps.js', uxpStub(urls)) as {
         entryForWriting: (path: string, overwrite: boolean, config: unknown) => Promise<unknown>;
       };
 
@@ -258,7 +132,7 @@ describe('UXP plugin loads', () => {
         if (specifier === 'photoshop') return STUBS.photoshop;
         if (specifier.startsWith('.')) {
           const target = join(pluginRoot, specifier.replace(/^\.\//, ''));
-          return loadPluginFile(pluginRoot, target.slice(pluginRoot.length + 1));
+          return loadPluginFile(target.slice(pluginRoot.length + 1));
         }
         throw new Error(`unexpected require "${specifier}"`);
       },
@@ -283,7 +157,7 @@ describe('UXP plugin loads', () => {
   });
 
   it('maps the host LayerKind values the way the schema expects', () => {
-    const ps = loadPluginFile(pluginRoot, 'lib/ps.js') as { mapLayerKind: (kind: unknown) => string };
+    const ps = loadPluginFile('lib/ps.js') as { mapLayerKind: (kind: unknown) => string };
     // Photoshop 26.11 exposes kind *values*, not ordinals — a numeric switch here
     // silently reports every layer as "other".
     expect(ps.mapLayerKind('pixel')).toBe('pixel');
@@ -299,7 +173,7 @@ describe('UXP plugin loads', () => {
   });
 
   it('coerces the loosely typed values the Photoshop DOM returns', () => {
-    const ps = loadPluginFile(pluginRoot, 'lib/ps.js') as { num: (v: unknown, f: number) => number };
+    const ps = loadPluginFile('lib/ps.js') as { num: (v: unknown, f: number) => number };
     // `doc.bitsPerChannel` comes back as the string "8" on Photoshop 26.x; passing
     // it through unconverted failed the MCP server's result-schema validation.
     expect(ps.num('8', 1)).toBe(8);
@@ -309,7 +183,7 @@ describe('UXP plugin loads', () => {
   });
 
   it('resolves the Photoshop Canvas Size anchor to a horizontal/vertical pair', () => {
-    const canvas = loadPluginFile(pluginRoot, 'lib/ops/canvas.js');
+    const canvas = loadPluginFile('lib/ops/canvas.js');
     // Canvas Size does not take a single `anchorPoint`; the wrong enum makes
     // Photoshop report "the user cancelled the operation".
     const anchor = (canvas as { __test_anchor: unknown }).__test_anchor;
@@ -321,7 +195,7 @@ describe('UXP plugin loads', () => {
   });
 
   it('base64-encodes without Buffer or btoa', () => {
-    const ps = loadPluginFile(pluginRoot, 'lib/ps.js') as {
+    const ps = loadPluginFile('lib/ps.js') as {
       toBase64: (bytes: number[] | Uint8Array) => string;
     };
     // UXP guarantees neither Buffer nor btoa; render_preview depends on this.
@@ -404,7 +278,7 @@ describe('place_image inserts an image without placeEvent', () => {
       write: async () => 1,
     });
 
-    const photoshop = photoshopStub() as Record<string, any>;
+    const photoshop = photoshopStub() as Record<string, unknown>;
     photoshop.app = {
       activeDocument: target,
       documents: [target],
@@ -421,7 +295,7 @@ describe('place_image inserts an image without placeEvent', () => {
   function load(photoshop: unknown, uxp: unknown) {
     STUBS.uxp = uxp as Stub;
     STUBS.photoshop = photoshop as Stub;
-    const images = loadPluginFile(pluginRoot, 'lib/ops/images.js') as {
+    const images = loadPluginFile('lib/ops/images.js') as {
       place_image: (ctx: { params: Record<string, unknown>; config: Record<string, string> }) => Promise<unknown>;
     };
     return images;
@@ -491,7 +365,7 @@ describe('text colour round-trips through the DOM', () => {
   }
 
   function textLayerPhotoshop(color: unknown) {
-    const photoshop = photoshopStub() as Record<string, any>;
+    const photoshop = photoshopStub() as Record<string, unknown>;
     const layer = photoshop.app.activeDocument.layers[0];
     layer.kind = 'text';
     layer.textItem.characterStyle.color = color;
@@ -500,7 +374,7 @@ describe('text colour round-trips through the DOM', () => {
 
   it('reads the colour out of the SolidColor descriptor', async () => {
     const photoshop = textLayerPhotoshop(solidColorLike(0, 170, 136));
-    const text = loadPluginFile(pluginRoot, 'lib/ops/text.js', undefined, photoshop) as {
+    const text = loadPluginFile('lib/ops/text.js', undefined, photoshop) as {
       get_text_layer: (ctx: { params: Record<string, unknown>; config: Record<string, string> }) => Promise<unknown>;
     };
 
@@ -515,7 +389,7 @@ describe('text colour round-trips through the DOM', () => {
   it('rounds the fractional channels Photoshop hands back', async () => {
     // Setting via the foreground colour returns `136.00000709295273`.
     const photoshop = textLayerPhotoshop(solidColorLike(255, 170.0000050663948, 136.00000709295273));
-    const text = loadPluginFile(pluginRoot, 'lib/ops/text.js', undefined, photoshop) as {
+    const text = loadPluginFile('lib/ops/text.js', undefined, photoshop) as {
       get_text_layer: (ctx: { params: Record<string, unknown>; config: Record<string, string> }) => Promise<unknown>;
     };
 
@@ -545,7 +419,7 @@ describe('document lifecycle', () => {
    * allowed either would hide exactly the behaviour this is here to pin down.
    */
   function documentStub() {
-    const photoshop = photoshopStub() as Record<string, any>;
+    const photoshop = photoshopStub() as Record<string, unknown>;
     const documents = [photoshop.app.activeDocument];
     photoshop.app.documents = documents;
     photoshop.app.documents.add = (options: { width?: number; height?: number }) => {
@@ -566,7 +440,7 @@ describe('document lifecycle', () => {
   }
 
   function canvas(photoshop: unknown) {
-    return loadPluginFile(pluginRoot, 'lib/ops/canvas.js', undefined, photoshop as Stub) as {
+    return loadPluginFile('lib/ops/canvas.js', undefined, photoshop as Stub) as {
       create_document: (ctx: { params: Record<string, unknown> }) => Promise<{
         id: string;
         name: string;
@@ -647,7 +521,7 @@ describe('DOM-backed operations, enumerated rather than assumed', () => {
    * registry rather than trusted.
    */
   it('routes every filter in the shared vocabulary to a Layer method', () => {
-    const filters = loadPluginFile(pluginRoot, 'lib/ops/filters.js') as { FILTERS: Record<string, unknown> };
+    const filters = loadPluginFile('lib/ops/filters.js') as { FILTERS: Record<string, unknown> };
     const operations = readFileSync(resolvePath(join(pluginRoot, '..', 'shared', 'src', 'photoshop', 'operations.ts')), 'utf8');
     const declared = [...operations.matchAll(/filter: z\.literal\('([a-zA-Z]+)'\)/g)].map((m) => m[1]);
 
@@ -663,7 +537,7 @@ describe('DOM-backed operations, enumerated rather than assumed', () => {
     // `applyAddNoise` rejects 'gaussian' with "Invalid constant. Expected
     // 'gaussian' to be one of Constants.NoiseDistribution", so the value has to
     // come from the enum. Verified on device, so this guards the mechanism.
-    const ps = loadPluginFile(pluginRoot, 'lib/ps.js') as {
+    const ps = loadPluginFile('lib/ps.js') as {
       enumValue: (name: string, key: string) => unknown;
       constants: Record<string, Record<string, string>>;
     };
@@ -689,7 +563,7 @@ describe('the module boundary', () => {
    * That is exactly what happened to `withForegroundColor`, and the live sweep is
    * what caught it, several minutes and one Photoshop restart later.
    */
-  const psExports = new Set(Object.keys(loadPluginFile(pluginRoot, 'lib/ps.js') as object));
+  const psExports = new Set(Object.keys(loadPluginFile('lib/ps.js') as object));
 
   const sharedHelpers = ['normalizeColor', 'withForegroundColor', 'solidColor', 'clampByte'];
 

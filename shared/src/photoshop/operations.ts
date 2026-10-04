@@ -282,15 +282,15 @@ export type PreviewResult = z.infer<typeof PreviewResultSchema>;
 /**
  * Colour input as written by a human or a model: either `{r,g,b}` or `"#rrggbb"`.
  *
+ * Aliased to `ColorInputSchema` rather than redeclared — the two differed only
+ * in the error message, and a second copy is a second thing to keep in step.
+ *
  * Deliberately *not* a `z.transform()`: the MCP tool schemas are converted to
  * JSON Schema for the model, and effect-wrapped fields make that conversion
  * lossy. Normalisation happens explicitly in the tool dispatch instead, so the
  * value crossing the bridge is always a plain `RgbColor`.
  */
-export const RgbInputSchema = z.union([
-  RgbColorSchema,
-  z.string().regex(/^#?[0-9a-fA-F]{6}$/, 'Expected "#rrggbb" or {r,g,b}'),
-]);
+export const RgbInputSchema = ColorInputSchema;
 
 // ---------------------------------------------------------------------------
 // brush parameter pieces
@@ -301,6 +301,17 @@ export const PointSchema = z.object({
   x: z.number().int(),
   y: z.number().int(),
 });
+export type Point = z.infer<typeof PointSchema>;
+
+/**
+ * The layer name a stroke lands on when `newLayer` is set without `layerName`.
+ *
+ * The plugin has its own copy of this string — it is standalone CommonJS shipped
+ * to a UXP host and cannot import `shared` — so a change here has to be made
+ * there too, or post-condition checks will look for a layer that was never
+ * created.
+ */
+export const DEFAULT_STROKE_LAYER_NAME = 'Stroke';
 
 /** A path segment for stroke_path. */
 export const PathSegmentSchema = z.discriminatedUnion('type', [
@@ -309,39 +320,51 @@ export const PathSegmentSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('curve'), cp1: PointSchema, cp2: PointSchema, point: PointSchema }),
 ]);
 
-/** Brush stroke parameters for stroke_path. */
-export const StrokePathParamsSchema = DocumentTargetSchema.extend({
-  /** Brush name (e.g. "Soft Round 21", "Hard Round 19"). Omit to use current brush. */
+/**
+ * Fields shared by `stroke_path` and `paint_stroke`.
+ *
+ * `brushName` is advisory on every host this project has run against: the brush
+ * engine is unreachable from UXP, so a stroke is rasterized as discs of
+ * `brushSize` and the name cannot change the result. It is kept so a caller that
+ * knows the host has a real brush engine can still pass one, and it is echoed
+ * back in the result rather than presented as the brush that was used.
+ */
+const BrushStrokeParamsBase = DocumentTargetSchema.extend({
+  /**
+   * Advisory only. No installed brush is selected — see the module comment.
+   */
   brushName: z.string().min(1).optional(),
-  /** Brush size in pixels. */
+  /** Stroke width in pixels. This is the diameter of the round brush that is swept along the path. */
   brushSize: z.number().int().positive().max(5000).optional(),
   /** Stroke colour. */
   color: RgbInputSchema.default({ r: 0, g: 0, b: 0 }),
   /** Opacity 0-100. */
   opacity: z.number().min(0).max(100).default(100),
-  /** Blend mode. */
+  /** Blend mode the stroke is composited with. */
   blendMode: BlendModeSchema.optional(),
-  /** Path segments defining the stroke. */
+  /** Paint onto a new layer instead of the active layer. */
+  newLayer: z.boolean().default(false),
+  /** Name for the layer when `newLayer` is set. */
+  layerName: z.string().min(1).optional(),
+});
+
+/** Brush stroke parameters for stroke_path. */
+export const StrokePathParamsSchema = BrushStrokeParamsBase.extend({
+  /**
+   * Path segments defining the stroke. `curve` segments carry two control points
+   * and are rasterized as a cubic Bézier, not as the straight chord between its
+   * endpoints.
+   */
   path: z.array(PathSegmentSchema).min(1),
-  /** Simulate pressure (tapers ends). */
+  /** Taper the ends, as if the pen pressed down and lifted off. */
   simulatePressure: z.boolean().default(false),
 });
 
 /** Brush stroke parameters for paint_stroke (freehand-style). */
-export const PaintStrokeParamsSchema = DocumentTargetSchema.extend({
-  /** Brush name (e.g. "Soft Round 21", "Hard Round 19"). Omit to use current brush. */
-  brushName: z.string().min(1).optional(),
-  /** Brush size in pixels. */
-  brushSize: z.number().int().positive().max(5000).optional(),
-  /** Stroke colour. */
-  color: RgbInputSchema.default({ r: 0, g: 0, b: 0 }),
-  /** Opacity 0-100. */
-  opacity: z.number().min(0).max(100).default(100),
-  /** Blend mode. */
-  blendMode: BlendModeSchema.optional(),
-  /** Array of points for the stroke. */
+export const PaintStrokeParamsSchema = BrushStrokeParamsBase.extend({
+  /** Points the stroke passes through, in order. */
   points: z.array(PointSchema).min(2),
-  /** Smooth the stroke (like Photoshop's smoothing). */
+  /** Corner-cutting passes over the points. 0 leaves them exactly as given. */
   smoothing: z.number().int().min(0).max(100).default(0),
 });
 
@@ -349,24 +372,62 @@ export const PaintStrokeParamsSchema = DocumentTargetSchema.extend({
 export const BrushInfoSchema = z.object({
   name: z.string(),
   size: z.number().int().optional(),
-  // Additional properties may be present depending on the brush
+  strokeTipStyle: z.string().optional(),
 });
 export type BrushInfo = z.infer<typeof BrushInfoSchema>;
 
-/** Result of list_brushes. */
+/**
+ * Result of list_brushes.
+ *
+ * `available: false` with an empty list is a real answer, not a failure: no
+ * UXP host this project has run against exposes a brush collection. Reporting
+ * that is the point — the previous implementation returned a fixed list of eight
+ * names that had nothing to do with the running Photoshop.
+ */
 export const ListBrushesResultSchema = z.object({
+  available: z.boolean(),
   brushes: z.array(BrushInfoSchema),
   currentBrush: z.string().nullable(),
+  /** Where the list came from, or `'unavailable'` when there is none. */
+  source: z.string().nullable(),
+  /** Why there is no list, when `available` is false. */
+  reason: z.string().optional(),
 });
 export type ListBrushesResult = z.infer<typeof ListBrushesResultSchema>;
 
-/** Result of stroke_path / paint_stroke. */
+/**
+ * Result of stroke_path / paint_stroke.
+ *
+ * The verification fields are the reason this shape is not just `{success}`: a
+ * fill can be accepted and change nothing. `samplesChanged` out of
+ * `samplesChecked` is the proof that ink landed, read from the canvas along the
+ * path rather than assumed from the call returning.
+ */
 export const BrushStrokeResultSchema = z.object({
   success: z.boolean(),
   layerId: z.number().int().optional(),
   layerName: z.string().optional(),
-  brushUsed: z.string().optional(),
+  /** Width actually painted with, in pixels. */
   brushSize: z.number().int().optional(),
+  blendMode: z.string().optional(),
+  /**
+   * Always `'rasterized-stroke'`. Named so a caller is never left believing the
+   * Photoshop brush engine ran.
+   */
+  methodUsed: z.string().optional(),
+  /** How many discs were filled. */
+  stampsPainted: z.number().int().optional(),
+  /** How many canvas samples were readable before and after the stroke. */
+  samplesChecked: z.number().int().optional(),
+  /** How many of those samples changed colour. */
+  samplesChanged: z.number().int().optional(),
+  /**
+   * `null` when the canvas could not be sampled at all, in which case the
+   * stroke is unproven rather than proven-and-empty.
+   */
+  verified: z.boolean().nullable().optional(),
+  /** True when the stamp cap stopped the stroke before its end. */
+  truncated: z.boolean().optional(),
 });
 export type BrushStrokeResult = z.infer<typeof BrushStrokeResultSchema>;
 
@@ -1000,8 +1061,9 @@ export const OPERATIONS = {
     tool: 'photoshop.list_brushes',
     title: 'List Brushes',
     description:
-      'List the brushes available in Photoshop. Returns the brush names and the currently selected brush. ' +
-      'Call this before stroke_path or paint_stroke to pick a brush that exists on this machine.',
+      'Report which brushes the running Photoshop exposes. Returns `available: false` with an empty list and a ' +
+      'reason on every current UXP host, because the brush engine is not reachable from a plugin. Do not treat ' +
+      'an empty list as a fault, and do not pick a brush name from it: `brushName` cannot change a stroke.',
     category: 'image',
     destructive: false,
     requiresConfirmation: false,
@@ -1012,11 +1074,12 @@ export const OPERATIONS = {
     tool: 'photoshop.stroke_path',
     title: 'Stroke Path',
     description:
-      'Stroke a vector path with a brush. Creates a path from the provided segments (move, line, curve) and ' +
-      'strokes it using Photoshop\'s brush engine. This produces real brush strokes with pressure simulation, ' +
-      'not filled shapes. The stroke is applied to a new layer. `brushName` must match an installed brush ' +
-      '(e.g. "Soft Round 21", "Hard Round 19"); omit to use the current brush. `simulatePressure` tapers ' +
-      'the stroke ends for a natural look.',
+      'Draw a stroke along a path. The path is rasterized by sweeping round discs of `brushSize` along it, so ' +
+      'the result has round ends and round corners and the requested width, but no brush tip texture. `curve` ' +
+      'segments are followed as real cubic Béziers. `simulatePressure` tapers both ends as if the pen pressed ' +
+      'down and lifted off. Paints onto the active layer unless `newLayer` is true. The stroke is verified by ' +
+      'sampling the canvas along the path before and after, so a reported success means pixels actually moved. ' +
+      'Prefer `paint_stroke` for freehand point lists.',
     category: 'image',
     destructive: false,
     requiresConfirmation: false,
@@ -1027,10 +1090,10 @@ export const OPERATIONS = {
     tool: 'photoshop.paint_stroke',
     title: 'Paint Stroke',
     description:
-      'Paint a freehand-style brush stroke through a series of points. Uses Photoshop\'s paint action ' +
-      'descriptor to simulate a brush stroke along the given points with smoothing. Creates a new layer ' +
-      'with the stroke. `brushName` must match an installed brush; omit to use the current brush. ' +
-      '`smoothing` (0-100) applies Photoshop\'s stroke smoothing for smoother curves.',
+      'Draw a freehand stroke through a list of points. `smoothing` (0-100) applies corner-cutting passes to round ' +
+      'off the polyline before it is drawn — raise it for a shaky mouse path, keep it at 0 for deliberate ' +
+      'straight segments. Paints onto the active layer unless `newLayer` is true. Verified by sampling the canvas ' +
+      'along the path, so a reported success means pixels actually moved.',
     category: 'image',
     destructive: false,
     requiresConfirmation: false,
