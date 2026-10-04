@@ -97,6 +97,7 @@ export const OPERATION_NAMES = [
   'list_brushes',
   'stroke_path',
   'paint_stroke',
+  'paint_gradient',
   // studio support
   'render_preview',
 ] as const;
@@ -313,6 +314,13 @@ export type Point = z.infer<typeof PointSchema>;
  */
 export const DEFAULT_STROKE_LAYER_NAME = 'Stroke';
 
+/**
+ * Default name for the layer `paint_gradient` creates, and the same
+ * arrangement as {@link DEFAULT_STROKE_LAYER_NAME}: duplicated into the plugin
+ * because that file cannot import `shared`.
+ */
+export const DEFAULT_GRADIENT_LAYER_NAME = 'Gradient';
+
 /** A path segment for stroke_path. */
 export const PathSegmentSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('move'), point: PointSchema }),
@@ -366,6 +374,59 @@ export const PaintStrokeParamsSchema = BrushStrokeParamsBase.extend({
   points: z.array(PointSchema).min(2),
   /** Corner-cutting passes over the points. 0 leaves them exactly as given. */
   smoothing: z.number().int().min(0).max(100).default(0),
+});
+
+/**
+ * One colour stop on a gradient ramp.
+ *
+ * Deliberately has no `opacity`. The fill's `opacity` is a whole-call property,
+ * and a per-stop alpha cannot be honoured by either shape: linear bands do not
+ * overlap so it would work, but radial rings do, and a ring painted at a
+ * different alpha than its neighbour would double-blend along the overlap. An
+ * accepted-and-ignored field is worse than an absent one, so it is absent until
+ * it can be honoured on both.
+ */
+export const GradientStopSchema = z.object({
+  /** 0-100 along the ramp, matching Photoshop's own scale. */
+  position: z.number().min(0).max(100),
+  color: RgbInputSchema,
+});
+export type GradientStop = z.infer<typeof GradientStopSchema>;
+
+/**
+ * Gradient parameters.
+ *
+ * A gradient is rasterized as a run of flat bands rather than handed to a native
+ * gradient fill, for the same reason strokes are rasterized: the host has no
+ * reachable adjustment-layer API here, and a result nobody can read back is a
+ * result nobody can trust. `bands` is how finely it is resolved, and `smoothRadius`
+ * trades a blur for the banding that leaves behind.
+ */
+export const PaintGradientParamsSchema = DocumentTargetSchema.extend({
+  /** At least two stops; they are sorted by position, so order does not matter. */
+  stops: z.array(GradientStopSchema).min(2),
+  type: z.enum(['linear', 'radial']).default('linear'),
+  /**
+   * Linear only. Named rather than an angle in degrees: a band is a filled
+   * rectangle, so only these four directions are exact, and a spelling the
+   * model cannot get subtly wrong is worth more here than full freedom.
+   */
+  direction: z.enum(['topToBottom', 'bottomToTop', 'leftToRight', 'rightToLeft']).default('topToBottom'),
+  /** Radial only. Defaults to the centre of the canvas. */
+  center: PointSchema.optional(),
+  /** Radial only, in pixels. Defaults to the half-diagonal. */
+  radius: z.number().positive().max(20000).optional(),
+  /** Flip the ramp, so the first stop lands at the far end. */
+  reverse: z.boolean().default(false),
+  /** How many bands the ramp is resolved into. More is smoother and slower. */
+  bands: z.number().int().min(2).max(256).default(128),
+  opacity: z.number().min(0).max(100).default(100),
+  blendMode: BlendModeSchema.optional(),
+  /** Blur radius applied afterwards, to hide the seams between bands. 0 leaves them. */
+  smoothRadius: z.number().min(0).max(50).default(0),
+  /** Paint onto a new layer instead of the active one. */
+  newLayer: z.boolean().default(false),
+  layerName: z.string().min(1).optional(),
 });
 
 /** Brush info result. */
@@ -430,6 +491,42 @@ export const BrushStrokeResultSchema = z.object({
   truncated: z.boolean().optional(),
 });
 export type BrushStrokeResult = z.infer<typeof BrushStrokeResultSchema>;
+
+/**
+ * Result of paint_gradient.
+ *
+ * Carries the same proof a stroke does: what was actually resolved
+ * (`bandsPainted`), and whether the canvas changed where it was supposed to
+ * (`verified`). A gradient that reports success without either has only been
+ * reported, not drawn.
+ */
+export const PaintGradientResultSchema = z.object({
+  success: z.boolean(),
+  layerId: z.number().int().optional(),
+  layerName: z.string().optional(),
+  type: z.enum(['linear', 'radial']).optional(),
+  blendMode: z.string().optional(),
+  /** Always `'rasterized-gradient'`: no native gradient fill was involved. */
+  methodUsed: z.string().optional(),
+  /** Bands actually filled. */
+  bandsPainted: z.number().int().optional(),
+  /** True when `bands` was capped and the ramp is coarser than asked for. */
+  truncated: z.boolean().optional(),
+  /** True when `smoothRadius` was applied. */
+  smoothed: z.boolean().optional(),
+  /**
+   * Why the requested blur did not happen, when one was asked for and could not
+   * be applied. Carried in the result rather than only in the log because the
+   * commonest case is silent: a fresh document's Background layer is locked
+   * against transforms, so `smoothRadius` on a brand-new canvas does nothing —
+   * and a caller that is not told will believe the ramp is smoother than it is.
+   */
+  smoothError: z.string().optional(),
+  samplesChecked: z.number().int().optional(),
+  samplesChanged: z.number().int().optional(),
+  verified: z.boolean().nullable().optional(),
+});
+export type PaintGradientResult = z.infer<typeof PaintGradientResultSchema>;
 
 // ---------------------------------------------------------------------------
 // the registry
@@ -1099,6 +1196,24 @@ export const OPERATIONS = {
     requiresConfirmation: false,
     params: PaintStrokeParamsSchema,
     result: BrushStrokeResultSchema,
+  },
+
+  paint_gradient: {
+    tool: 'photoshop.paint_gradient',
+    title: 'Paint Gradient',
+    description:
+      'Fill with a colour ramp. `stops` are position/colour pairs along 0-100; two are enough for a straight fade, ' +
+      'three or more for sky, water or any light that changes as it travels. `type: "linear"` runs along ' +
+      '`direction` ("topToBottom" is the usual choice for a sky, darkening towards the horizon); `type: "radial"` ' +
+      'fades outward from `center` and is what makes a glow around the sun or moon. The ramp is resolved into ' +
+      '`bands` flat bands — raise it for a smoother result and lower it when a fill must be quick — and ' +
+      '`smoothRadius` blurs the seams afterwards. Prefer this over stacking many strokes to fake a fade: one call, ' +
+      'one verified result. Paints onto the active layer unless `newLayer` is true.',
+    category: 'image',
+    destructive: false,
+    requiresConfirmation: false,
+    params: PaintGradientParamsSchema,
+    result: PaintGradientResultSchema,
   },
 
   // ---------------------------------------------------------------- images

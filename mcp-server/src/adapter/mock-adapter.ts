@@ -7,6 +7,7 @@ import {
   UNKNOWN_CONNECTION,
   StudioException,
   DEFAULT_STROKE_LAYER_NAME,
+  DEFAULT_GRADIENT_LAYER_NAME,
   normalizeColor,
   type AdapterConnection,
   type AdapterTarget,
@@ -30,9 +31,16 @@ import {
   type TextLayerInfo,
   type ListBrushesResult,
   type BrushStrokeResult,
+  type PaintGradientResult,
 } from '@photoshop-ai-studio/shared';
 import { Workspace } from '../workspace.js';
 import { flattenSegments, rasterizeStamps, type FlatPath } from './stroke-geometry.js';
+import {
+  gradientVerificationPoints,
+  linearBands,
+  radialBands,
+  type GradientBand,
+} from './gradient-geometry.js';
 
 /** The capability ids the plugin reports; kept here so the two stay comparable. */
 const MOCK_CAPABILITIES = [
@@ -113,6 +121,20 @@ interface MockStroke {
   stamps: Array<{ x: number; y: number; r: number }>;
 }
 
+/**
+ * A gradient the mock has painted.
+ *
+ * Held as bands rather than a rendered image so a preview can scale them with
+ * the rest of the document, exactly as it does for stroke stamps — a gradient
+ * the preview cannot show is a gradient nobody can check by eye.
+ */
+interface MockGradient {
+  layerId: number;
+  opacity: number;
+  type: 'linear' | 'radial';
+  bands: GradientBand[];
+}
+
 /** Cap mirroring the plugin's, so the mock and the plugin fail the same way. */
 const MAX_MOCK_STAMPS = 4000;
 
@@ -128,6 +150,8 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
   private readonly documents = new Map<string, MockDocument>();
   /** Strokes drawn in this session, in paint order. */
   private readonly strokes: MockStroke[] = [];
+  /** Gradients painted in this session, in paint order. */
+  private readonly gradients: MockGradient[] = [];
   private activeId: string | null = null;
   private connected = true;
   private lastLatencyMs: number | null = null;
@@ -814,6 +838,112 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
   }
 
   /**
+   * Resolves a ramp into bands and records them, mirroring the plugin's
+   * `paint_gradient` band for band.
+   *
+   * The geometry comes from `gradient-geometry.ts`, a mirror of the plugin's
+   * own module rather than a second implementation of it: a mock that resolved
+   * gradients differently would produce a plan that is rehearsed against
+   * banding the finished document does not have.
+   */
+  async paintGradient(params: ParamsOf<'paint_gradient'>): Promise<PaintGradientResult> {
+    const doc = this.active();
+    const type = params.type === 'radial' ? 'radial' : 'linear';
+    // Normalized rather than read straight off the params: the schema supplies a
+    // default, but a direct adapter call skips it, and an `undefined` opacity
+    // would quietly filter the gradient out of every preview.
+    const opacity = typeof params.opacity === 'number' ? params.opacity : 100;
+    // `RgbInputSchema` accepts "#rrggbb" as well as {r,g,b}, so the stops are
+    // normalized here rather than in the geometry: both implementations must
+    // read the same colour, or a hex stop would quietly become black in one of
+    // them.
+    const stops = params.stops.map((stop) => ({
+      position: stop.position,
+      color: normalizeColor(stop.color),
+    }));
+
+    const resolved =
+      type === 'radial'
+        ? radialBands({
+            stops,
+            width: doc.width,
+            height: doc.height,
+            bands: params.bands,
+            reverse: params.reverse,
+            center: params.center,
+            radius: params.radius,
+          })
+        : linearBands({
+            stops,
+            width: doc.width,
+            height: doc.height,
+            bands: params.bands,
+            reverse: params.reverse,
+            direction: params.direction,
+          });
+
+    if (resolved.bands.length === 0) {
+      throw new StudioException('INVALID_PARAMS', 'The gradient resolved to no visible bands on this canvas.');
+    }
+
+    const layer =
+      params.newLayer === true
+        ? this.addLayer(doc, {
+            name: params.layerName ?? DEFAULT_GRADIENT_LAYER_NAME,
+            type: 'pixel',
+            x: 0,
+            y: 0,
+            width: doc.width,
+            height: doc.height,
+            opacity,
+            visible: true,
+          })
+        : this.activeLayer(doc);
+
+    this.gradients.push({
+      layerId: layer.id,
+      opacity,
+      type,
+      bands: resolved.bands,
+    });
+    doc.saved = false;
+
+    const points = gradientVerificationPoints(
+      {
+        type,
+        direction: params.direction,
+        width: doc.width,
+        height: doc.height,
+        center: params.center,
+        radius: params.radius,
+      },
+      12,
+    );
+    const onCanvas = points.filter(
+      (p) => p.x >= 0 && p.y >= 0 && p.x < doc.width && p.y < doc.height,
+    ).length;
+
+    return {
+      success: true,
+      layerId: layer.id,
+      layerName: layer.name,
+      type,
+      blendMode: params.blendMode,
+      methodUsed: 'rasterized-gradient',
+      bandsPainted: resolved.bands.length,
+      truncated: resolved.truncated,
+      // The mock has no separable blur, so a requested one is reported as not
+      // applied rather than assumed. Claiming a smooth that never happened is
+      // the exact failure this project keeps having to undo.
+      smoothed: false,
+      smoothError: params.smoothRadius > 0 ? 'The mock has no separable blur, so smoothRadius was not applied.' : undefined,
+      samplesChecked: onCanvas,
+      samplesChanged: onCanvas,
+      verified: onCanvas > 0 ? true : null,
+    };
+  }
+
+  /**
    * Rasterizes a stroke into the mock's stroke record and reports the same
    * verification the plugin does, so a plan that draws and then samples the
    * canvas behaves identically here and in Photoshop.
@@ -876,6 +1006,34 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
       verified: onCanvas > 0 ? true : null,
       truncated: stamps.length >= MAX_MOCK_STAMPS,
     };
+  }
+
+  /**
+   * Gradients to paint into a preview, scaled with the document.
+   *
+   * Without this a gradient would be recorded and never seen: the plan would
+   * claim a sky, the mock would say `success`, and the one place a human can
+   * check the result would show the document unchanged.
+   */
+  private previewGradients(doc: MockDocument, scale: number): Array<{
+    type: 'linear' | 'radial';
+    opacity: number;
+    bounds: Array<{ left: number; top: number; right: number; bottom: number; color: RgbColor }>;
+  }> {
+    const hidden = new Set(doc.layers.filter((l) => !l.visible).map((l) => l.id));
+    return this.gradients
+      .filter((gradient) => !hidden.has(gradient.layerId) && gradient.opacity > 0)
+      .map((gradient) => ({
+        type: gradient.type,
+        opacity: gradient.opacity,
+        bounds: gradient.bands.map((band) => ({
+          left: band.bounds.left * scale,
+          top: band.bounds.top * scale,
+          right: band.bounds.right * scale,
+          bottom: band.bounds.bottom * scale,
+          color: band.color,
+        })),
+      }));
   }
 
   /**
@@ -1020,7 +1178,7 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
     const width = Math.max(1, Math.round(doc.width * scale));
     const height = Math.max(1, Math.round(doc.height * scale));
     mkdirSync(dirname(path), { recursive: true });
-    const png = createSolidPng(width, height, { r: 32, g: 34, b: 40 }, doc.layers.filter((l) => l.visible).map((l) => ({ ...l, scale })), this.previewStrokes(doc, scale));
+    const png = createSolidPng(width, height, { r: 32, g: 34, b: 40 }, doc.layers.filter((l) => l.visible).map((l) => ({ ...l, scale })), this.previewStrokes(doc, scale), this.previewGradients(doc, scale));
     writeFileSync(path, png);
     return { path, format: 'png', bytes: png.byteLength, overwritten: params.overwrite };
   }
@@ -1063,7 +1221,7 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
     const scale = Math.min(1, params.maxWidth / Math.max(1, doc.width));
     const width = Math.max(1, Math.round(doc.width * scale));
     const height = Math.max(1, Math.round(doc.height * scale));
-    const png = createSolidPng(width, height, { r: 32, g: 34, b: 40 }, doc.layers.filter((l) => l.visible).map((l) => ({ ...l, scale })), this.previewStrokes(doc, scale));
+    const png = createSolidPng(width, height, { r: 32, g: 34, b: 40 }, doc.layers.filter((l) => l.visible).map((l) => ({ ...l, scale })), this.previewStrokes(doc, scale), this.previewGradients(doc, scale));
     return { mimeType: 'image/png', base64: png.toString('base64'), width, height };
   }
 
@@ -1408,12 +1566,33 @@ function chunk(type: string, data: Buffer): Buffer {
  * it rasterized, so the preview shows the same mark that `sample_color` will
  * report and that `stroke_path` claims it painted.
  */
+/** Whether a point falls inside an ellipse given by its bounding box. */
+function insideEllipse(
+  x: number,
+  y: number,
+  box: { left: number; top: number; right: number; bottom: number },
+): boolean {
+  const cx = (box.left + box.right) / 2;
+  const cy = (box.top + box.bottom) / 2;
+  const rx = (box.right - box.left) / 2;
+  const ry = (box.bottom - box.top) / 2;
+  if (rx <= 0 || ry <= 0) return false;
+  const dx = (x - cx) / rx;
+  const dy = (y - cy) / ry;
+  return dx * dx + dy * dy <= 1;
+}
+
 function createSolidPng(
   width: number,
   height: number,
   background: RgbColor,
   layers: ReadonlyArray<LayerInfo & { scale: number }>,
   strokes: ReadonlyArray<{ x: number; y: number; r: number; color: RgbColor; opacity: number }> = [],
+  gradients: ReadonlyArray<{
+    type: 'linear' | 'radial';
+    opacity: number;
+    bounds: ReadonlyArray<{ left: number; top: number; right: number; bottom: number; color: RgbColor }>;
+  }> = [],
 ): Buffer {
   const bands = layers
     .filter((l) => l.width > 0 && l.height > 0)
@@ -1445,6 +1624,19 @@ function createSolidPng(
           r = Math.round(r * (1 - a) + stroke.color.r * a);
           g = Math.round(g * (1 - a) + stroke.color.g * a);
           b = Math.round(b * (1 - a) + stroke.color.b * a);
+        }
+      }
+      for (const gradient of gradients) {
+        for (const gband of gradient.bounds) {
+          const inside =
+            gradient.type === 'radial'
+              ? insideEllipse(x + 0.5, y + 0.5, gband)
+              : y + 0.5 >= gband.top && y + 0.5 < gband.bottom && x + 0.5 >= gband.left && x + 0.5 < gband.right;
+          if (!inside) continue;
+          const a = gradient.opacity / 100;
+          r = Math.round(r * (1 - a) + gband.color.r * a);
+          g = Math.round(g * (1 - a) + gband.color.g * a);
+          b = Math.round(b * (1 - a) + gband.color.b * a);
         }
       }
       for (const band of bands) {

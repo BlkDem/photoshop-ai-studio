@@ -1,6 +1,12 @@
 import type { Expectation } from './diff.js';
 import type { LayerSelector } from './layer.js';
-import { DEFAULT_STROKE_LAYER_NAME, OPERATIONS, type ParamsOf, type PhotoshopOpName } from './operations.js';
+import {
+  DEFAULT_GRADIENT_LAYER_NAME,
+  DEFAULT_STROKE_LAYER_NAME,
+  OPERATIONS,
+  type ParamsOf,
+  type PhotoshopOpName,
+} from './operations.js';
 
 /**
  * Mechanical derivation of post-conditions from a single `(tool, params)` pair.
@@ -348,6 +354,16 @@ export function deriveExpectations<K extends PhotoshopOpName>(
       // `layerName` was absent would leave the common case unverified.
       const layerName =
         typeof p.layerName === 'string' && p.layerName.length > 0 ? p.layerName : DEFAULT_STROKE_LAYER_NAME;
+      return [{ kind: 'layer_exists', layer: { layerName }, where: 'document' }];
+    }
+
+    case 'paint_gradient': {
+      if (p.newLayer !== true) return [];
+      // Same reasoning as a stroke: a gradient asked onto its own layer is
+      // verified by that layer existing afterwards. The fill itself is verified
+      // by the operation's own canvas read, which travels back in the result.
+      const layerName =
+        typeof p.layerName === 'string' && p.layerName.length > 0 ? p.layerName : DEFAULT_GRADIENT_LAYER_NAME;
       return [{ kind: 'layer_exists', layer: { layerName }, where: 'document' }];
     }
 
