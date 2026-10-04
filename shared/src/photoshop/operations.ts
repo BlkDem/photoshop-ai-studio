@@ -1201,7 +1201,10 @@ export const OPERATIONS = {
       'along the path, so a reported success means pixels actually moved. ' +
       'For light: a low `opacity` is real transparency, so overlapping translucent strokes build density where ' +
       'water is thick and leave the crest thin; and `blendMode: "screen"` with a small `brushSize` is a ' +
-      'highlight, being the one mode that can brighten a pixel past its own colour.',
+      'highlight, being the one mode that can brighten a pixel past its own colour. Light coming *through* a ' +
+      'form is the same tool used differently: put a small screen glow just inside the edge and a little below ' +
+      'a crest, so the brightest part lands inside the shape and falls off above and below it instead of ' +
+      'sitting on the edge as a highlight.',
     category: 'image',
     destructive: false,
     requiresConfirmation: false,
