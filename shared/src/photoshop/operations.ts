@@ -1208,7 +1208,11 @@ export const OPERATIONS = {
       'fades outward from `center` and is what makes a glow around the sun or moon. The ramp is resolved into ' +
       '`bands` flat bands — raise it for a smoother result and lower it when a fill must be quick — and ' +
       '`smoothRadius` blurs the seams afterwards. Prefer this over stacking many strokes to fake a fade: one call, ' +
-      'one verified result. Paints onto the active layer unless `newLayer` is true.',
+      'one verified result. Paints onto the active layer unless `newLayer` is true. ' +
+      'For light, pair a radial ramp that ends at black with `blendMode: "screen"` or `"lighten"`: black is the ' +
+      'transparent colour for both, so the glow fades out instead of fading to a dark colour, and the rings are ' +
+      'corrected so they composite to the ramp rather than washing out to white. `"lighten"` cannot brighten ' +
+      'past its own colour; `screen` can, which is what a moon needs.',
     category: 'image',
     destructive: false,
     requiresConfirmation: false,

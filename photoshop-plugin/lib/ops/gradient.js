@@ -191,6 +191,7 @@ function paintGradient(ctx) {
           reverse: params.reverse,
           center: params.center,
           radius: params.radius,
+          blendMode: blendMode,
         })
       : geometry.linearBands({
           stops: params.stops,

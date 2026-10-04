@@ -83,6 +83,53 @@ function colorAt(stops, t) {
   return last.color;
 }
 
+/**
+ * Blend modes under which overlapping rings add up, and the one formula they share.
+ *
+ * `screen` and `linearDodge` both compose as `1 - (1-a)(1-b)`, so a stack of
+ * overlapping fills multiplies out the other way round. That is what makes them
+ * the right modes for light: a glow can brighten a pixel past its own own
+ * colour. It is also why a radial gradient needs its ring colours corrected —
+ * see `additiveIncrements`.
+ */
+var ACCUMULATING_MODES = { screen: true, linearDodge: true };
+
+/**
+ * Ring colours for a radial ramp painted under an accumulating mode.
+ *
+ * Radial bands overlap by construction: the innermost ring still contains every
+ * pixel the outermost one covered. Painted as-is, two dozen rings of a
+ * moon-white-to-black ramp under `screen` composite to solid white across the
+ * middle of the glow — measured on Photoshop 26.11, the centre came out
+ * `#ffffff` and no falloff began until 120px out. A glow with no falloff is not
+ * a glow.
+ *
+ * So each ring is given the *increment* that leaves the composite equal to the
+ * ramp. After rings `N-1 … k` the result is `1 - Π(1 - c)`, and requiring that to
+ * equal the ramp at that radius gives
+ *
+ *     c_k = 1 - (1 - T_k) / (1 - T_{k+1})
+ *
+ * with `T_N = 0`. The result is a set of ring colours that look wrong in
+ * isolation and composite to exactly the ramp that was asked for.
+ */
+function additiveIncrements(targets) {
+  var out = new Array(targets.length);
+  var carried = 1; // Π(1 - c) over the rings painted before this one
+
+  // `targets` is outermost-first, which is the paint order, and the recurrence
+  // runs the same way: each ring has to leave the running product at the value
+  // its own radius asks for, given where the rings outside it left the product.
+  for (var i = 0; i < targets.length; i += 1) {
+    var remaining = 1 - targets[i];
+    var increment = carried > 0 ? 1 - remaining / carried : 1;
+    var level = Math.round(Math.min(255, Math.max(0, increment * 255)));
+    out[i] = { r: level, g: level, b: level };
+    carried = remaining > 0 ? remaining : 0;
+  }
+  return out;
+}
+
 /** Bands are capped, so a caller asking for 5000 gets a coarser ramp and is told. */
 function resolveBands(requested) {
   var asked = Math.round(Number(requested));
@@ -152,6 +199,11 @@ function linearBands(options) {
   return { bands: bands, truncated: resolved.truncated };
 }
 
+/** Rec. 601 luma: what a blend mode effectively integrates. */
+function luminance(color) {
+  return 0.299 * color.r + 0.587 * color.g + 0.114 * color.b;
+}
+
 /**
  * Concentric ellipses from the centre outwards.
  *
@@ -168,7 +220,9 @@ function radialBands(options) {
   var radius = options.radius && options.radius > 0 ? options.radius : halfDiagonal;
   var reverse = options.reverse === true;
 
+  // Outermost first, because that is the order the bands are painted in.
   var bands = [];
+  var targets = [];
   for (var i = resolved.bands - 1; i >= 0; i -= 1) {
     var from = i / resolved.bands;
     var to = (i + 1) / resolved.bands;
@@ -178,6 +232,7 @@ function radialBands(options) {
     // already — a flip that does not flip.
     var mid = (from + to) / 2;
     var t = reverse ? 1 - mid : mid;
+    var rampColor = colorAt(stops, t);
     bands.push({
       bounds: {
         left: centerX - r,
@@ -185,9 +240,21 @@ function radialBands(options) {
         right: centerX + r,
         bottom: centerY + r,
       },
-      color: colorAt(stops, t),
+      color: rampColor,
       t: t,
     });
+    // A blend mode integrates brightness, not hue, so the increments come from
+    // the ramp's luma: a saturated blue glow and a grey one of equal brightness
+    // have to behave the same way or the correction is hue-dependent.
+    targets.push(luminance(rampColor) / 255);
+  }
+
+  // Rings overlap, so an accumulating mode would add them all up and wash the
+  // middle of the glow out to flat white. Each ring is given the increment that
+  // leaves the composite equal to the ramp instead.
+  if (ACCUMULATING_MODES[options.blendMode]) {
+    var increments = additiveIncrements(targets);
+    for (var k = 0; k < bands.length; k += 1) bands[k].color = increments[k];
   }
 
   return { bands: bands, truncated: resolved.truncated };

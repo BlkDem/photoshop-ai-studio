@@ -107,6 +107,19 @@ describe('the mock and the plugin resolve a gradient identically', () => {
     expect(plugin.linearBands({ stops: SKY, width: 100, height: 100, bands: 5000 }).truncated).toBe(true);
   });
 
+  it('resolves a glow the same way under an accumulating blend mode', () => {
+    // The ring increments are the whole point of the correction, so the mock has
+    // to derive them identically or a rehearsed glow would not match the document.
+    const moon = [
+      { position: 0, color: { r: 255, g: 244, b: 214 } },
+      { position: 100, color: { r: 0, g: 0, b: 0 } },
+    ];
+    for (const blendMode of ['screen', 'linearDodge', 'lighten', 'normal']) {
+      const options = { stops: moon, width: 800, height: 600, bands: 24, center: { x: 400, y: 200 }, radius: 220, blendMode };
+      expect(plugin.radialBands(options).bands).toEqual(mockRadialBands(options).bands);
+    }
+  });
+
   it('samples the same points to verify', () => {
     for (const options of [
       { type: 'linear', direction: 'topToBottom', width: 1200, height: 800 },

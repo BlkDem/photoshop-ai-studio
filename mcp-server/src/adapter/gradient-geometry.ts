@@ -87,6 +87,44 @@ export function resolveBands(requested: number | undefined): { bands: number; tr
   return { bands: Math.min(MAX_BANDS, safe), truncated: safe > MAX_BANDS };
 }
 
+/**
+ * Blend modes under which overlapping rings add up, and the one formula they share.
+ *
+ * Mirrors the plugin: `screen` and `linearDodge` compose as `1 - (1-a)(1-b)`, so
+ * a stack of overlapping fills multiplies out the other way round. That is what
+ * makes them the right modes for light, and why a radial ramp needs its ring
+ * colours corrected when one of them is used.
+ */
+const ACCUMULATING_MODES: Record<string, boolean> = { screen: true, linearDodge: true };
+
+/** Rec. 601 luma: what a blend mode effectively integrates. */
+function luminance(color: { r: number; g: number; b: number }): number {
+  return 0.299 * color.r + 0.587 * color.g + 0.114 * color.b;
+}
+
+/**
+ * Ring colours for a radial ramp painted under an accumulating mode.
+ *
+ * After rings up to and including `k` the result is `1 - Π(1 - c)`; requiring
+ * that to equal the ramp at that radius gives `c_k = 1 - (1 - T_k)/(1 - T_{k-1})`.
+ * The colours look wrong in isolation and composite to exactly the ramp asked
+ * for, which is the point: without this a screen-blended glow saturates to flat
+ * white across its whole middle.
+ */
+export function additiveIncrements(targets: number[]): Array<{ r: number; g: number; b: number }> {
+  const out: Array<{ r: number; g: number; b: number }> = [];
+  let carried = 1;
+
+  for (let i = 0; i < targets.length; i += 1) {
+    const remaining = 1 - targets[i]!;
+    const increment = carried > 0 ? 1 - remaining / carried : 1;
+    const level = Math.round(Math.min(255, Math.max(0, increment * 255)));
+    out.push({ r: level, g: level, b: level });
+    carried = remaining > 0 ? remaining : 0;
+  }
+  return out;
+}
+
 export interface LinearBandOptions {
   stops: GradientStopInput[] | undefined;
   width: number;
@@ -135,6 +173,8 @@ export interface RadialBandOptions {
   reverse?: boolean;
   center?: Point;
   radius?: number;
+  /** Composite the bands are painted with; decides whether they accumulate. */
+  blendMode?: string;
 }
 
 export function radialBands(options: RadialBandOptions): { bands: GradientBand[]; truncated: boolean } {
@@ -146,7 +186,9 @@ export function radialBands(options: RadialBandOptions): { bands: GradientBand[]
   const radius = options.radius && options.radius > 0 ? options.radius : halfDiagonal;
   const reverse = options.reverse === true;
 
+  // Outermost first, because that is the order the bands are painted in.
   const bands: GradientBand[] = [];
+  const targets: number[] = [];
   for (let i = resolved.bands - 1; i >= 0; i -= 1) {
     const from = i / resolved.bands;
     const to = (i + 1) / resolved.bands;
@@ -154,11 +196,18 @@ export function radialBands(options: RadialBandOptions): { bands: GradientBand[]
     // Mirrors the plugin: `reverse` flips about the midpoint, it does not shift.
     const mid = (from + to) / 2;
     const t = reverse ? 1 - mid : mid;
+    const rampColor = colorAt(stops, t);
     bands.push({
       bounds: { left: centerX - r, top: centerY - r, right: centerX + r, bottom: centerY + r },
-      color: colorAt(stops, t),
+      color: rampColor,
       t,
     });
+    targets.push(luminance(rampColor) / 255);
+  }
+
+  if (ACCUMULATING_MODES[options.blendMode ?? '']) {
+    const increments = additiveIncrements(targets);
+    for (let k = 0; k < bands.length; k += 1) bands[k]!.color = increments[k]!;
   }
 
   return { bands, truncated: resolved.truncated };
