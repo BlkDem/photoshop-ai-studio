@@ -51,6 +51,51 @@ export class OpenAiCompatibleGateway implements ModelGateway {
     return this.config.model;
   }
 
+  /**
+   * Names the likely cause of a transport failure.
+   *
+   * Node reports a refused connection, an unresolvable host and a DNS failure
+   * all as the same `fetch failed`, which tells an operator nothing and sends
+   * them looking in the wrong place: "start the server" and "correct the
+   * address" are opposite fixes, and the message has to distinguish them.
+   *
+   * The loopback hint earns its place. `127.0.0.1` resolves to whichever
+   * machine the request is made *from*, so a stack configured on Windows and
+   * driven from WSL (or the reverse) fails exactly this way while every process
+   * looks healthy — and the address in the config is correct-looking.
+   */
+  private explainTransportFailure(baseUrl: string | undefined, err: unknown): string {
+    const url = baseUrl ?? 'the configured base URL';
+    const code = (err as { cause?: { code?: string } } | undefined)?.cause?.code ?? '';
+    const isLoopback = /\b(127\.0\.0\.1|localhost|\[::1\])\b/.test(url);
+
+    // The specific codes go first. undici reports a refused connection, a dead
+    // host and a DNS failure with the same `TypeError: fetch failed`, so the
+    // message alone cannot tell them apart — only `cause.code` can.
+    if (code === 'ECONNREFUSED') {
+      const hint = isLoopback
+        ? ` The address is a loopback address, so it means the machine the Orchestrator itself runs on — from WSL that is not Windows, and from Windows it is not the WSL distro. Use the address of whichever host serves the model.`
+        : '';
+      return `Nothing is listening at ${url}. Start the model server, or point the role's base URL at one that is.${hint}`;
+    }
+
+    if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') {
+      return `The host in ${url} does not resolve. Check the address, or the name resolution for it.`;
+    }
+
+    if (code === 'ETIMEDOUT' || code === 'UND_ERR_HEADERS_TIMEOUT' || (err as Error).name === 'TimeoutError') {
+      return `${url} accepted the connection but sent no answer in time. Raise the role's timeout, or check whether the model is still loading.`;
+    }
+
+    // No usable code: `fetch failed` with nothing underneath it is a refused
+    // connection far more often than anything else, so it gets the same answer.
+    if (/fetch failed/i.test((err as Error).message)) {
+      return `Nothing is listening at ${url}, or the connection was dropped before a reply. Start the model server, or point the role's base URL at one that is.`;
+    }
+
+    return `Request to ${url} failed: ${(err as Error).message}`;
+  }
+
   private async complete(system: string, user: string): Promise<string> {
     if (!this.config.apiKey) {
       throw new ModelUnavailableError(
@@ -88,7 +133,7 @@ export class OpenAiCompatibleGateway implements ModelGateway {
       });
     } catch (err) {
       throw new ModelUnavailableError(
-        `Request to ${this.config.baseUrl} failed: ${(err as Error).message}`,
+        this.explainTransportFailure(this.config.baseUrl, err),
         this.provider,
         this.config.model,
         { cause: err },
