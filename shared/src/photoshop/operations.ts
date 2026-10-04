@@ -1198,7 +1198,10 @@ export const OPERATIONS = {
       'Draw a freehand stroke through a list of points. `smoothing` (0-100) applies corner-cutting passes to round ' +
       'off the polyline before it is drawn — raise it for a shaky mouse path, keep it at 0 for deliberate ' +
       'straight segments. Paints onto the active layer unless `newLayer` is true. Verified by sampling the canvas ' +
-      'along the path, so a reported success means pixels actually moved.',
+      'along the path, so a reported success means pixels actually moved. ' +
+      'For light: a low `opacity` is real transparency, so overlapping translucent strokes build density where ' +
+      'water is thick and leave the crest thin; and `blendMode: "screen"` with a small `brushSize` is a ' +
+      'highlight, being the one mode that can brighten a pixel past its own colour.',
     category: 'image',
     destructive: false,
     requiresConfirmation: false,
