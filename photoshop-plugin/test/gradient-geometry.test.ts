@@ -11,13 +11,14 @@ const geometry = loadPurePluginFile<{
     direction?: string;
   }): { bands: Array<{ bounds: { left: number; top: number; right: number; bottom: number }; color: { r: number; g: number; b: number }; t: number }>; truncated: boolean };
   radialBands(options: {
-    stops: Array<{ position: number; color: { r: number; g: number; b: number }; opacity?: number }>;
+    stops: Array<{ position: number; color: { r: number; g: number; b: number } }>;
     width: number;
     height: number;
     bands?: number;
     reverse?: boolean;
     center?: { x: number; y: number };
     radius?: number;
+    blendMode?: string;
   }): { bands: Array<{ bounds: { left: number; top: number; right: number; bottom: number }; color: { r: number; g: number; b: number }; t: number }>; truncated: boolean };
   normalizeStops(stops: Array<{ position: number; color: { r: number; g: number; b: number } }>): Array<{ position: number; color: { r: number; g: number; b: number } }>;
   colorAt(stops: ReturnType<typeof normalizeStops>, t: number): { r: number; g: number; b: number };
@@ -193,5 +194,93 @@ describe('verificationPoints', () => {
     expect(points.length).toBeGreaterThan(3);
     expect(points.some((p) => p.x !== 200 && p.y === 200)).toBe(true);
     expect(points.some((p) => p.y !== 200 && p.x === 200)).toBe(true);
+  });
+});
+
+describe('light under an accumulating blend mode', () => {
+  const MOON = [
+    { position: 0, color: { r: 255, g: 244, b: 214 } },
+    { position: 100, color: { r: 0, g: 0, b: 0 } },
+  ];
+  const luma = (c: { r: number; g: number; b: number }): number => 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
+
+  /** What `screen` leaves after the rings so far, painted outermost-first. */
+  const composited = (bands: Array<{ color: { r: number; g: number; b: number } }>): number[] => {
+    let product = 1;
+    return bands.map((band) => {
+      product *= 1 - luma(band.color) / 255;
+      return Math.round((1 - product) * 255);
+    });
+  };
+
+  it('composes to the ramp instead of saturating to white', () => {
+    // Measured on Photoshop 26.11 before the correction: twenty-four rings of
+    // this ramp under `screen` composited to #ffffff across the whole middle,
+    // with no falloff until 120px out. A glow with no falloff is not a glow.
+    const { bands } = geometry.radialBands({
+      stops: MOON,
+      width: 800,
+      height: 600,
+      bands: 24,
+      center: { x: 400, y: 200 },
+      radius: 220,
+      blendMode: 'screen',
+    });
+
+    const levels = composited(bands);
+    expect(levels[0]).toBeLessThan(20);
+    expect(levels[levels.length - 1]).toBeGreaterThan(200);
+    // Monotonic all the way in, with no plateau where it clips.
+    for (let i = 1; i < levels.length; i += 1) {
+      expect(levels[i]!).toBeGreaterThanOrEqual(levels[i - 1]!);
+      expect(levels[i]!).toBeLessThan(255);
+    }
+  });
+
+  it('leaves the ramp alone for a mode that does not accumulate', () => {
+    // `lighten` takes a maximum rather than a sum, so the rings already compose
+    // to the ramp and correcting them would darken it.
+    const plain = geometry.radialBands({ stops: MOON, width: 800, height: 600, bands: 8, radius: 220 });
+    const lightened = geometry.radialBands({
+      stops: MOON, width: 800, height: 600, bands: 8, radius: 220, blendMode: 'lighten',
+    });
+    expect(lightened.bands.map((b) => b.color)).toEqual(plain.bands.map((b) => b.color));
+  });
+
+  it('keeps the increments neutral, so the glow takes its hue from the mode', () => {
+    // An increment is a quantity of light, not a colour. If it carried the
+    // ramp's hue, a screen-blended blue glow would also paint the sky's tint
+    // into every ring it passes over.
+    const { bands } = geometry.radialBands({
+      stops: [{ position: 0, color: { r: 20, g: 90, b: 220 } }, { position: 100, color: { r: 10, g: 20, b: 40 } }],
+      width: 400,
+      height: 400,
+      bands: 8,
+      radius: 200,
+      blendMode: 'screen',
+    });
+    for (const band of bands) {
+      expect(band.color.r).toBe(band.color.g);
+      expect(band.color.g).toBe(band.color.b);
+    }
+  });
+
+  it('gives two ramps of equal brightness the same increments', () => {
+    // Same luma profile, different hue: the correction is derived from luma, so
+    // the ring levels have to come out identical.
+    const levels = (stops: Array<{ position: number; color: { r: number; g: number; b: number } }>) =>
+      geometry.radialBands({ stops, width: 400, height: 400, bands: 8, radius: 200, blendMode: 'screen' })
+        .bands.map((b) => Math.round(luma(b.color)));
+
+    const grey = levels([{ position: 0, color: { r: 200, g: 200, b: 200 } }, { position: 100, color: { r: 0, g: 0, b: 0 } }]);
+    // 0.299r + 0.587g + 0.114b = 200 with a warm tint rather than pure grey.
+    const warmTop = { r: 255, g: 190, b: 130 };
+    const warm = levels([{ position: 0, color: warmTop }, { position: 100, color: { r: 0, g: 0, b: 0 } }]);
+    expect(Math.abs(luma(warmTop) - 200)).toBeLessThan(3);
+    // Within a level, not identical: the recurrence compounds rounding, and two
+    // ramps that are only near-equal in luma are not owed identical rings.
+    for (let i = 0; i < grey.length; i += 1) {
+      expect(Math.abs(warm[i]! - grey[i]!)).toBeLessThanOrEqual(3);
+    }
   });
 });

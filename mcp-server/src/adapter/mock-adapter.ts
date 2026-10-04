@@ -872,6 +872,7 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
             reverse: params.reverse,
             center: params.center,
             radius: params.radius,
+            blendMode: params.blendMode,
           })
         : linearBands({
             stops,
