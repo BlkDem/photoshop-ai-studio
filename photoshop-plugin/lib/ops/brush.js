@@ -540,4 +540,13 @@ module.exports = {
   list_brushes: listBrushes,
   stroke_path: strokePath,
   paint_stroke: paintStroke,
+  // Shared with the gradient rasterizer. A gradient is the same two primitives
+  // in a different order — select a shape, fill it — so it uses these rather
+  // than keeping its own copies that could drift from the ones under test.
+  fillSelection: fillSelection,
+  readSamples: readSamples,
+  sameColor: sameColor,
+  deselect: deselect,
+  selectionType: selectionType,
+  MAX_STAMPS: MAX_STAMPS,
 };

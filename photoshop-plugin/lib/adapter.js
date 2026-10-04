@@ -23,6 +23,7 @@ var imageOps = require('./ops/images.js');
 var capabilityOps = require('./ops/capabilities.js');
 var filterOps = require('./ops/filters.js');
 var brushOps = require('./ops/brush.js');
+var gradientOps = require('./ops/gradient.js');
 
 /** op name → (ctx) => Promise<result>. `ctx` is {params, config, documentId}. */
 var OPERATIONS = {
@@ -83,6 +84,7 @@ var OPERATIONS = {
   list_brushes: brushOps.list_brushes,
   stroke_path: brushOps.stroke_path,
   paint_stroke: brushOps.paint_stroke,
+  paint_gradient: gradientOps.paint_gradient,
 
   // canvas
   resize_canvas: canvasOps.resize_canvas,
@@ -247,6 +249,7 @@ function commandNameFor(op) {
     list_brushes: 'List brushes',
     stroke_path: 'Stroke path',
     paint_stroke: 'Paint stroke',
+    paint_gradient: 'Paint gradient',
   };
   return 'AI Studio: ' + (names[op] || op);
 }

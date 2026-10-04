@@ -98,6 +98,8 @@ var VERIFIED = [
   'brush.rasterize',
   'brush.sample_color',
   'brush.selection_ellipse',
+  'brush.selection_rectangle',
+  'brush.gradient',
 ];
 
 /**
@@ -132,6 +134,7 @@ var NOT_ON_DOM = {
  */
 var UNSUPPORTED = {
   'brush.engine': 'Photoshop\'s brush engine cannot be reached from UXP on this build, so `stroke_path` and `paint_stroke` rasterize the path with overlapping discs instead of driving the brush. Four routes were measured and all four fail: `core.executeScript` / `_executeScript` / `evalScript` / `doScript` are absent from `core`, `action` and `app` per an `Object.getOwnPropertyNames` dump; `core.performMenuCommand` cannot resolve a command symbol because `constants.MenuCommand` exposes no members here, so every spelling returns `timeOut`; the `_obj: \'stroke\'` batchPlay descriptor hangs because a descriptor without `strokeStyle`/`paintStyle` leaves Photoshop waiting on a dialog a modal scope cannot dismiss; and `_obj: \'paint\'` is rejected as "command unavailable". ExtendScript\'s `PathItem.stroke()` is a real brush and does work from a .jsx file driven over COM — see `scripts/brush-firework.jsx` — but that route is outside the plugin.',
+  'brush.gradient': 'Photoshop\'s native gradient fill (an adjustment layer) is not reachable from UXP on this build either — no adjustment-layer API exists in this host, so `paint_gradient` resolves the ramp into `bands` flat fills drawn with `selection.selectRectangle` (linear) or `selection.selectEllipse` (radial). The seams are real: raise `bands` to make them finer, or set `smoothRadius` to blur them out. Only the four axis directions are exact, because a band is an axis-aligned rectangle.',
   'brush.list': 'No brush collection is reachable: neither `app.brushes` nor `document.brushes` exists on this build. `list_brushes` reports `available: false` with a reason instead of inventing names. A brush *name* therefore cannot change a stroke — strokes are discs of the diameter in `brushSize`.',
   'brush.tip': 'Stroke width comes from `brushSize` alone. Tip shape, hardness, spacing, flow and jitter are not modelled, so two brushes of the same diameter rasterize identically.',
   'document.crop': 'Every form of the `crop` descriptor is refused; ExtendScript performs the same crop through COM.',
@@ -207,6 +210,7 @@ function readApiSurface() {
     'selection.invert': probe(doc, 'selection.inverse'),
     'selection.feather': probe(doc, 'selection.feather'),
     'selection.select_ellipse': probe(doc, 'selection.selectEllipse'),
+    'selection.select_rectangle': probe(doc, 'selection.selectRectangle'),
 
     // --- brushes, probed rather than assumed ---
     'app.brushes': probe(photoshop.app, 'brushes'),

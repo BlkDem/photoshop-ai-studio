@@ -344,6 +344,10 @@ export class UxpRemoteAdapter implements PhotoshopAdapter {
     return (await this.send('paint_stroke', params)) as ResultOf<'paint_stroke'>;
   }
 
+  async paintGradient(params: ParamsOf<'paint_gradient'>): Promise<ResultOf<'paint_gradient'>> {
+    return (await this.send('paint_gradient', params)) as ResultOf<'paint_gradient'>;
+  }
+
   // --- images --------------------------------------------------------------
 
   async placeImage(params: ParamsOf<'place_image'>): Promise<ResultOf<'place_image'>> {

@@ -164,3 +164,60 @@ describe('mock strokes', () => {
     expect((await adapter.getDocumentInfo()).saved).toBe(false);
   });
 });
+
+describe('mock gradients', () => {
+  let workspaceDir: string;
+  let adapter: MockPhotoshopAdapter;
+
+  beforeEach(() => {
+    workspaceDir = mkdtempSync(join(tmpdir(), 'studio-mock-gradient-'));
+    adapter = new MockPhotoshopAdapter({ workspace: new Workspace(workspaceDir, join(workspaceDir, 'out')) });
+  });
+
+  afterEach(() => {
+    rmSync(workspaceDir, { recursive: true, force: true });
+  });
+
+  const stops = [
+    { position: 0, color: { r: 8, g: 16, b: 40 } },
+    { position: 100, color: { r: 250, g: 214, b: 160 } },
+  ];
+
+  it('records the bands it resolved and proves the canvas changed', async () => {
+    const result = await adapter.paintGradient({ documentId: 'active', stops, bands: 16 });
+
+    expect(result.success).toBe(true);
+    expect(result.methodUsed).toBe('rasterized-gradient');
+    expect(result.bandsPainted).toBe(16);
+    expect(result.verified).toBe(true);
+    expect(result.samplesChanged).toBeGreaterThan(0);
+  });
+
+  it('changes the preview, so the result can be checked by eye', async () => {
+    // The mock draws previews as a PNG it composes itself. A gradient that
+    // painted and never appeared here would be exactly the invisible success
+    // this project exists to catch, so the pixels are compared, not the length.
+    // `maxWidth` carries a schema default, so a direct adapter call has to
+    // supply it — without it the preview scales by NaN.
+    const before = await adapter.renderPreview({ documentId: 'active', maxWidth: 960 });
+    await adapter.paintGradient({ documentId: 'active', stops, bands: 8 });
+    const after = await adapter.renderPreview({ documentId: 'active', maxWidth: 960 });
+
+    expect(after.base64).not.toBe(before.base64);
+    expect(after.width).toBeGreaterThan(0);
+  });
+
+  it('clamps an impossible band count rather than drawing nothing', async () => {
+    // `bands` has a schema minimum, so the geometry never sees zero; it still
+    // has to cope, because a ramp of one band would be a flat fill the caller
+    // did not ask for.
+    const result = await adapter.paintGradient({ documentId: 'active', stops, bands: 0 as never });
+    expect(result.bandsPainted).toBeGreaterThanOrEqual(2);
+  });
+
+  it('never claims a blur the mock cannot apply', async () => {
+    const result = await adapter.paintGradient({ documentId: 'active', stops, bands: 4, smoothRadius: 6 });
+    expect(result.success).toBe(true);
+    expect(result.smoothed).toBe(false);
+  });
+});
