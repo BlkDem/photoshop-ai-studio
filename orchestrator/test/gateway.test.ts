@@ -366,3 +366,61 @@ describe('OpenAI-compatible gateway over HTTP', () => {
     await expect(gateway().plan({ userRequest: 'x', state, tools })).rejects.toThrow(/empty completion \(finish_reason: stop\)/);
   });
 });
+
+describe('a model that cannot be reached', () => {
+  const logger = { warn: () => {} };
+
+  const transportFailure = (code: string, message = 'fetch failed', name = 'TypeError') => {
+    const err = new Error(message);
+    err.name = name;
+    (err as { cause?: unknown }).cause = { code };
+    vi.stubGlobal('fetch', vi.fn(async () => Promise.reject(err)));
+  };
+
+  const planner = (baseUrl: string) =>
+    new OpenAiCompatibleGateway({
+      role: 'planner',
+      model: 'space-bunny-alpha',
+      apiKey: 'k',
+      baseUrl,
+      temperature: 0.1,
+      timeoutMs: 1000,
+      maxTokens: 8192,
+      logger,
+    });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('says nothing is listening, rather than reporting "fetch failed"', async () => {
+    // `fetch failed` is all Node gives for a refused connection, an unresolvable
+    // host and a dead server alike, and the three have different fixes.
+    transportFailure('ECONNREFUSED');
+    await expect(planner('http://models.internal:1234/v1').plan({ userRequest: 'x', state, tools }))
+      .rejects.toThrow(/Nothing is listening at http:\/\/models\.internal:1234\/v1/);
+  });
+
+  it('warns that a loopback address means the machine the orchestrator runs on', async () => {
+    // The trap this exists for: a stack configured on Windows and driven from
+    // WSL, both processes healthy, both configs looking right, and nothing
+    // listening because `127.0.0.1` is the wrong machine entirely.
+    transportFailure('ECONNREFUSED');
+    await expect(planner('http://127.0.0.1:1234/v1').plan({ userRequest: 'x', state, tools }))
+      .rejects.toThrow(/from WSL that is not Windows/);
+  });
+
+  it('distinguishes a host that does not resolve', async () => {
+    transportFailure('ENOTFOUND');
+    await expect(planner('http://nope.invalid:1234/v1').plan({ userRequest: 'x', state, tools }))
+      .rejects.toThrow(/does not resolve/);
+  });
+
+  it('distinguishes a server that accepted the connection but never answered', async () => {
+    // "Raise the timeout" is the opposite advice to "start the server", so a
+    // timeout must not be reported as a dead endpoint.
+    transportFailure('ETIMEDOUT', 'The operation was aborted due to timeout', 'TimeoutError');
+    await expect(planner('http://models.internal:1234/v1').plan({ userRequest: 'x', state, tools }))
+      .rejects.toThrow(/accepted the connection but sent no answer in time/);
+  });
+});

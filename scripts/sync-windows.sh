@@ -47,8 +47,15 @@ if [ "$(powershell.exe -NoProfile -Command "if (Test-Path '$DEST') { 'yes' }" 2>
 fi
 
 set +e
+# `data` is excluded on purpose. It is runtime state, not source: the model
+# registry in there stores API keys and role assignments, and each host's copy
+# describes that host's own models. Copying it made a Windows deployment adopt
+# a registry seeded on the WSL side — wrong endpoint, wrong roles, and a
+# credential belonging to the other machine — and it then persisted, because the
+# registry writes its state back on start. Both sides seed their own from `.env`
+# on first run.
 robocopy.exe "$SOURCE" "$DEST" /E \
-  /XD node_modules dist logs coverage .turbo .git \
+  /XD node_modules dist logs coverage .turbo .git data \
   /XF "${SCRATCH[@]}" \
   /NFL /NDL /NP > /dev/null
 code=$?
