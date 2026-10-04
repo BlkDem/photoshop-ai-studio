@@ -389,3 +389,125 @@ describe('list_brushes', () => {
     expect(result.source).toBe('app.brushes');
   });
 });
+
+/**
+ * A host that honours the alpha in a fill descriptor.
+ *
+ * `drawingHost` paints every covered pixel solid, which is the right stub for
+ * geometry and exactly the wrong one for opacity: it would make a stroke asked
+ * at 20% and one asked at 100% indistinguishable. This one reads
+ * `opacity._value` and blends, which is what Photoshop does with it.
+ */
+function alphaHost(width = 400, height = 300) {
+  const pixels = new Map<string, Rgb>();
+  const key = (x: number, y: number) => `${x},${y}`;
+  const ellipses: Array<{ left: number; top: number; right: number; bottom: number }> = [];
+  let rgb = WHITE;
+
+  const layer = { id: 7, name: 'Layer 1' };
+  const document: Record<string, unknown> = {
+    id: 1,
+    name: 'alpha.psd',
+    width,
+    height,
+    resolution: 72,
+    mode: 'RGB',
+    layers: [layer],
+    backgroundLayer: layer,
+    activeLayer: layer,
+    activeLayers: [layer],
+    saved: true,
+    zoom: 100,
+    selection: {
+      selectEllipse: (bounds: { left: number; top: number; right: number; bottom: number }) => {
+        ellipses.push(bounds);
+        return Promise.resolve();
+      },
+      deselect: () => Promise.resolve(),
+    },
+    sampleColor: (p: { x: number; y: number }) => pixels.get(key(p.x, p.y)) ?? WHITE,
+    createLayer: () => ({ id: 99, name: 'Stroke' }),
+  };
+
+  const photoshop = photoshopStub() as Record<string, unknown>;
+  (photoshop.action as { batchPlay: unknown }).batchPlay = (descriptors: unknown) => {
+    for (const descriptor of descriptors as Array<Record<string, unknown>>) {
+      const spec = descriptor as { _obj?: string; to?: { _obj?: string; red?: number; green?: number; blue?: number }; opacity?: { _value?: number } };
+      if (spec._obj === 'set' && spec.to?._obj === 'RGBColor') {
+        rgb = { r: spec.to.red ?? 0, g: spec.to.green ?? 0, b: spec.to.blue ?? 0 };
+        continue;
+      }
+      const percent = spec.opacity?._value;
+      const a = typeof percent === 'number' ? percent / 100 : 1;
+      const box = ellipses[ellipses.length - 1];
+      if (!box) continue;
+      for (let y = box.top; y < box.bottom; y += 1) {
+        for (let x = box.left; x < box.right; x += 1) {
+          const under = pixels.get(key(x, y)) ?? WHITE;
+          pixels.set(key(x, y), {
+            r: Math.round(under.r * (1 - a) + rgb.r * a),
+            g: Math.round(under.g * (1 - a) + rgb.g * a),
+            b: Math.round(under.b * (1 - a) + rgb.b * a),
+          });
+        }
+      }
+    }
+    return Promise.resolve([{}]);
+  };
+  photoshop.app = { activeDocument: document, documents: [document], foregroundColor: {} };
+  return { photoshop, pixels, darkness: (x: number, y: number) => {
+    const c = pixels.get(key(x, y)) ?? WHITE;
+    return 100 - ((c.r + c.g + c.b) / 3 / 255) * 100;
+  } };
+}
+
+describe('stroke opacity', () => {
+  const line = [{ x: 20, y: 150 }, { x: 380, y: 150 }];
+
+  it('lands on the opacity asked for rather than five times denser', async () => {
+    // The discs overlap five deep, so handing each of them the requested alpha
+    // composited to 76.5% for a stroke asked at 25% — measured on Photoshop
+    // 26.11, and reproducible here because the host blends exactly as it does.
+    for (const opacity of [25, 50, 75]) {
+      const host = alphaHost();
+      const brush = loadBrush(host.photoshop);
+      await brush.paint_stroke({ params: { ...baseParams, brushSize: 40, opacity, color: BLACK, points: line } });
+      expect(Math.abs(host.darkness(200, 150) - opacity)).toBeLessThan(3);
+    }
+  });
+
+  it('leaves a full-opacity stroke full and a faint one faint', async () => {
+    const full = alphaHost();
+    await loadBrush(full.photoshop).paint_stroke({ params: { ...baseParams, brushSize: 40, opacity: 100, color: BLACK, points: line } });
+
+    const faint = alphaHost();
+    await loadBrush(faint.photoshop).paint_stroke({ params: { ...baseParams, brushSize: 40, opacity: 15, color: BLACK, points: line } });
+
+    expect(full.darkness(200, 150)).toBeGreaterThan(99);
+    expect(faint.darkness(200, 150)).toBeLessThan(20);
+    expect(faint.darkness(200, 150)).toBeGreaterThan(10);
+  });
+
+  it('divides the alpha by the overlap the geometry actually produced', () => {
+    // Pure check on the conversion, so a change in stamp spacing cannot quietly
+    // change what `opacity` means.
+    const alpha = (opacity: number, radius: number, stamps: number) =>
+      loadBrush(photoshopStub() as never).strokeAlpha(opacity, radius, stamps) as number;
+
+    expect(alpha(100, 60, 5)).toBe(100);
+    expect(alpha(0, 60, 5)).toBe(0);
+
+    // Stated as the property rather than a constant: `spacing` is 0.4 of the
+    // radius, so five discs stack on a centreline pixel, and the per-disc alpha
+    // has to be the one whose five-fold composite is the requested 25%.
+    const fiveDeep = alpha(25, 60, 40) / 100;
+    expect(1 - Math.pow(1 - fiveDeep, 5)).toBeCloseTo(0.25, 6);
+
+    // A stroke with no overlap must not be dimmed by a divisor borrowed from a
+    // long one: a single disc asked at 25% is 25%, not a fifth of it.
+    expect(alpha(25, 60, 1)).toBeCloseTo(25, 6);
+    // Fewer discs means less to divide by, so the per-disc alpha is *higher*.
+    expect(alpha(25, 60, 2)).toBeLessThan(alpha(25, 60, 1));
+    expect(alpha(25, 60, 40)).toBeLessThan(alpha(25, 60, 2));
+  });
+});

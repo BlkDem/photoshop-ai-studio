@@ -86,7 +86,7 @@ function selectionType() {
  */
 function fillSelection(opacity, blendMode) {
   var mode = { _enum: 'blendMode', _value: blendMode || 'normal' };
-  var percent = { _unit: 'percent', _value: opacity };
+  var percent = { _unit: 'percentUnit', _value: opacity };
 
   var attempts = [
     [{
@@ -393,6 +393,38 @@ function listBrushes() {
 }
 
 /**
+ * Converts a requested stroke opacity into the per-disc alpha that yields it.
+ *
+ * The rasterizer sweeps discs `spacing` apart, so a point in the middle of a
+ * stroke is covered by `2 * radius / spacing` of them — five, at the 0.4 spacing
+ * used here. Compositing that many alphas multiplies out as `1 - (1-a)^N`, so
+ * handing each disc the requested alpha made the stroke `1-(1-x)^5` times too
+ * dense: measured on Photoshop 26.11, a stroke asked at 25% landed at 76.5%, and
+ * a second identical stroke compounded exactly as `1-(1-a)^2` predicts, to
+ * within 0.1%. The compositing was sound; only the per-disc value was wrong.
+ *
+ * The divisor is the overlap the stroke *actually has*, capped by how many discs
+ * it actually emitted. A one-disc stroke has no overlap, so it must not be
+ * dimmed by a divisor borrowed from a long one — that showed up as a single dot
+ * coming out at 15% when 25% was asked for.
+ *
+ * What the result means: `opacity` is the alpha at the stroke's core, and the
+ * ends fall off below it because fewer discs cover them. That is how a brush
+ * behaves and it is the reading a caller has, but it is a change of meaning from
+ * "per disc", so it is stated rather than assumed.
+ */
+function strokeAlpha(opacity, radius, stampCount) {
+  var requested = Math.min(100, Math.max(0, Number(opacity)));
+  if (requested >= 100) return 100;
+  if (requested <= 0) return 0;
+
+  var r = Math.max(0.5, radius);
+  var spacing = geometry.stampSpacing(r);
+  var overlap = Math.min(Math.max(1, stampCount || 1), Math.max(1, (2 * r) / spacing));
+  return (1 - Math.pow(1 - requested / 100, 1 / overlap)) * 100;
+}
+
+/**
  * Shared body of `stroke_path` and `paint_stroke`.
  *
  * The two operations differ only in how they receive their geometry — a segment
@@ -451,7 +483,9 @@ function drawStroke(ctx, geometryInput) {
       newLayer: params.newLayer === true,
     });
 
-    return rasterizeAndVerify(doc, selection, stroke, opacity, blendMode)
+    // `opacity` is the opacity of the stroke; the discs that make it up get the
+    // alpha that adds up to it.
+    return rasterizeAndVerify(doc, selection, stroke, strokeAlpha(opacity, stroke.radius, stroke.stamps.length), blendMode)
       .then(function (proof) {
         var info = target ? { layerId: target.id, layerName: target.name } : docInfo(doc);
 
@@ -548,5 +582,6 @@ module.exports = {
   sameColor: sameColor,
   deselect: deselect,
   selectionType: selectionType,
+  strokeAlpha: strokeAlpha,
   MAX_STAMPS: MAX_STAMPS,
 };
