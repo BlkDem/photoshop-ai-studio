@@ -5,6 +5,7 @@ import type { DocumentListResult } from './operations.js';
 import type { LayerInfo, LayerSelector, LayerPosition } from './layer.js';
 import type { CapabilitiesResult, ExportResult, ExportFormat, ParamsOf, PreviewResult, SampleColorResult } from './operations.js';
 import type { FontInfo, RgbColor, TextAlign, TextLayerInfo } from './text.js';
+import type { ListBrushesResult, BrushStrokeResult } from './operations.js';
 /**
  * The Photoshop abstraction layer (brief §12).
  *
@@ -27,6 +28,17 @@ import type { FontInfo, RgbColor, TextAlign, TextLayerInfo } from './text.js';
 export interface PhotoshopAdapter {
   /** Human-readable description of the backend (used by Studio's status line). */
   readonly target: AdapterTarget;
+
+  /**
+   * Runs a diagnostic operation by name, bypassing the dispatch table.
+   *
+   * Optional on purpose. Diagnostics exist to interrogate a live host, so only
+   * an adapter that can actually reach Photoshop implements this. The mock does
+   * not, and is answered with a clear `UNSUPPORTED_OPERATION` rather than a
+   * fabricated result — a mock that invented pixel values would defeat the
+   * entire purpose of probing.
+   */
+  diagnostic?(op: string, params: unknown): Promise<unknown>;
 
   isConnected(): boolean;
   getConnection(): AdapterConnection;
@@ -106,6 +118,11 @@ export interface PhotoshopAdapter {
   setTextPosition(sel: LayerSelector, x: number, y: number): Promise<TextLayerInfo>;
   setTextFontSize(sel: LayerSelector, fontSize: number): Promise<TextLayerInfo>;
   setTextColor(sel: LayerSelector, color: RgbColor): Promise<TextLayerInfo>;
+
+  // --- brushes -------------------------------------------------------------
+  listBrushes(params: ParamsOf<'list_brushes'>): Promise<ListBrushesResult>;
+  strokePath(params: ParamsOf<'stroke_path'>): Promise<BrushStrokeResult>;
+  paintStroke(params: ParamsOf<'paint_stroke'>): Promise<BrushStrokeResult>;
 
   // --- images --------------------------------------------------------------
   placeImage(params: ParamsOf<'place_image'>): Promise<LayerInfo>;

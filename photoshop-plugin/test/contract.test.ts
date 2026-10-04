@@ -85,6 +85,14 @@ describe('manifest', () => {
 });
 
 describe('plugin / shared contract', () => {
+  /**
+   * Diagnostics that exist only to answer a question about this host — which
+   * route actually fills a layer, whether an API is present. They are reached by
+   * name over the bridge and must not appear in the tool surface: an operation a
+   * planner can select is a promise the project then has to keep.
+   */
+  const DIAGNOSTIC_PREFIX = 'probe_';
+
   it('implements every operation declared in the shared registry', () => {
     const implemented = new Set(implementedOps());
     const missing = OP_NAMES.filter((op) => !implemented.has(op));
@@ -92,8 +100,9 @@ describe('plugin / shared contract', () => {
   });
 
   it('implements nothing that the shared registry does not declare', () => {
-    const implemented = implementedOps();
-    const extra = implemented.filter((op) => !(OP_NAMES as readonly string[]).includes(op));
+    const extra = implementedOps().filter(
+      (op) => !op.startsWith(DIAGNOSTIC_PREFIX) && !(OP_NAMES as readonly string[]).includes(op),
+    );
     expect(extra, `unknown operations in the plugin: ${extra.join(', ')}`).toEqual([]);
   });
 

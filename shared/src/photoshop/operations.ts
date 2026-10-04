@@ -88,10 +88,15 @@ export const OPERATION_NAMES = [
   'modify_selection',
   'set_layer_locking',
   'duplicate_layers',
+  'apply_image',
   // pixels
   'apply_image',
   // text support
   'list_fonts',
+  // brush operations
+  'list_brushes',
+  'stroke_path',
+  'paint_stroke',
   // studio support
   'render_preview',
 ] as const;
@@ -103,9 +108,17 @@ export type PhotoshopOpName = (typeof OPERATION_NAMES)[number];
 // ---------------------------------------------------------------------------
 
 /** Identifies which open document an operation targets. */
+/**
+ * Photoshop reports document and layer ids as numbers, so a model that reads
+ * one out of the state it was shown will write one back. The wire type is a
+ * string, and rejecting the copy outright fails the whole plan over a value that
+ * identifies exactly one document, so it is normalised here instead.
+ */
+const IdSchema = z.union([z.string().min(1), z.number().int()]).transform((v) => String(v));
+
 export const DocumentTargetSchema = z.object({
   /** Omit or pass `"active"` to target the document the user is looking at. */
-  documentId: z.string().min(1).default('active'),
+  documentId: IdSchema.default('active'),
 });
 
 export type DocumentTarget = z.infer<typeof DocumentTargetSchema>;
@@ -269,15 +282,154 @@ export type PreviewResult = z.infer<typeof PreviewResultSchema>;
 /**
  * Colour input as written by a human or a model: either `{r,g,b}` or `"#rrggbb"`.
  *
+ * Aliased to `ColorInputSchema` rather than redeclared — the two differed only
+ * in the error message, and a second copy is a second thing to keep in step.
+ *
  * Deliberately *not* a `z.transform()`: the MCP tool schemas are converted to
  * JSON Schema for the model, and effect-wrapped fields make that conversion
  * lossy. Normalisation happens explicitly in the tool dispatch instead, so the
  * value crossing the bridge is always a plain `RgbColor`.
  */
-export const RgbInputSchema = z.union([
-  RgbColorSchema,
-  z.string().regex(/^#?[0-9a-fA-F]{6}$/, 'Expected "#rrggbb" or {r,g,b}'),
+export const RgbInputSchema = ColorInputSchema;
+
+// ---------------------------------------------------------------------------
+// brush parameter pieces
+// ---------------------------------------------------------------------------
+
+/** A point in document pixels. */
+export const PointSchema = z.object({
+  x: z.number().int(),
+  y: z.number().int(),
+});
+export type Point = z.infer<typeof PointSchema>;
+
+/**
+ * The layer name a stroke lands on when `newLayer` is set without `layerName`.
+ *
+ * The plugin has its own copy of this string — it is standalone CommonJS shipped
+ * to a UXP host and cannot import `shared` — so a change here has to be made
+ * there too, or post-condition checks will look for a layer that was never
+ * created.
+ */
+export const DEFAULT_STROKE_LAYER_NAME = 'Stroke';
+
+/** A path segment for stroke_path. */
+export const PathSegmentSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('move'), point: PointSchema }),
+  z.object({ type: z.literal('line'), point: PointSchema }),
+  z.object({ type: z.literal('curve'), cp1: PointSchema, cp2: PointSchema, point: PointSchema }),
 ]);
+
+/**
+ * Fields shared by `stroke_path` and `paint_stroke`.
+ *
+ * `brushName` is advisory on every host this project has run against: the brush
+ * engine is unreachable from UXP, so a stroke is rasterized as discs of
+ * `brushSize` and the name cannot change the result. It is kept so a caller that
+ * knows the host has a real brush engine can still pass one, and it is echoed
+ * back in the result rather than presented as the brush that was used.
+ */
+const BrushStrokeParamsBase = DocumentTargetSchema.extend({
+  /**
+   * Advisory only. No installed brush is selected — see the module comment.
+   */
+  brushName: z.string().min(1).optional(),
+  /** Stroke width in pixels. This is the diameter of the round brush that is swept along the path. */
+  brushSize: z.number().int().positive().max(5000).optional(),
+  /** Stroke colour. */
+  color: RgbInputSchema.default({ r: 0, g: 0, b: 0 }),
+  /** Opacity 0-100. */
+  opacity: z.number().min(0).max(100).default(100),
+  /** Blend mode the stroke is composited with. */
+  blendMode: BlendModeSchema.optional(),
+  /** Paint onto a new layer instead of the active layer. */
+  newLayer: z.boolean().default(false),
+  /** Name for the layer when `newLayer` is set. */
+  layerName: z.string().min(1).optional(),
+});
+
+/** Brush stroke parameters for stroke_path. */
+export const StrokePathParamsSchema = BrushStrokeParamsBase.extend({
+  /**
+   * Path segments defining the stroke. `curve` segments carry two control points
+   * and are rasterized as a cubic Bézier, not as the straight chord between its
+   * endpoints.
+   */
+  path: z.array(PathSegmentSchema).min(1),
+  /** Taper the ends, as if the pen pressed down and lifted off. */
+  simulatePressure: z.boolean().default(false),
+});
+
+/** Brush stroke parameters for paint_stroke (freehand-style). */
+export const PaintStrokeParamsSchema = BrushStrokeParamsBase.extend({
+  /** Points the stroke passes through, in order. */
+  points: z.array(PointSchema).min(2),
+  /** Corner-cutting passes over the points. 0 leaves them exactly as given. */
+  smoothing: z.number().int().min(0).max(100).default(0),
+});
+
+/** Brush info result. */
+export const BrushInfoSchema = z.object({
+  name: z.string(),
+  size: z.number().int().optional(),
+  strokeTipStyle: z.string().optional(),
+});
+export type BrushInfo = z.infer<typeof BrushInfoSchema>;
+
+/**
+ * Result of list_brushes.
+ *
+ * `available: false` with an empty list is a real answer, not a failure: no
+ * UXP host this project has run against exposes a brush collection. Reporting
+ * that is the point — the previous implementation returned a fixed list of eight
+ * names that had nothing to do with the running Photoshop.
+ */
+export const ListBrushesResultSchema = z.object({
+  available: z.boolean(),
+  brushes: z.array(BrushInfoSchema),
+  currentBrush: z.string().nullable(),
+  /** Where the list came from, or `'unavailable'` when there is none. */
+  source: z.string().nullable(),
+  /** Why there is no list, when `available` is false. */
+  reason: z.string().optional(),
+});
+export type ListBrushesResult = z.infer<typeof ListBrushesResultSchema>;
+
+/**
+ * Result of stroke_path / paint_stroke.
+ *
+ * The verification fields are the reason this shape is not just `{success}`: a
+ * fill can be accepted and change nothing. `samplesChanged` out of
+ * `samplesChecked` is the proof that ink landed, read from the canvas along the
+ * path rather than assumed from the call returning.
+ */
+export const BrushStrokeResultSchema = z.object({
+  success: z.boolean(),
+  layerId: z.number().int().optional(),
+  layerName: z.string().optional(),
+  /** Width actually painted with, in pixels. */
+  brushSize: z.number().int().optional(),
+  blendMode: z.string().optional(),
+  /**
+   * Always `'rasterized-stroke'`. Named so a caller is never left believing the
+   * Photoshop brush engine ran.
+   */
+  methodUsed: z.string().optional(),
+  /** How many discs were filled. */
+  stampsPainted: z.number().int().optional(),
+  /** How many canvas samples were readable before and after the stroke. */
+  samplesChecked: z.number().int().optional(),
+  /** How many of those samples changed colour. */
+  samplesChanged: z.number().int().optional(),
+  /**
+   * `null` when the canvas could not be sampled at all, in which case the
+   * stroke is unproven rather than proven-and-empty.
+   */
+  verified: z.boolean().nullable().optional(),
+  /** True when the stamp cap stopped the stroke before its end. */
+  truncated: z.boolean().optional(),
+});
+export type BrushStrokeResult = z.infer<typeof BrushStrokeResultSchema>;
 
 // ---------------------------------------------------------------------------
 // the registry
@@ -296,6 +448,15 @@ export interface OperationDefinition {
   readonly requiresConfirmation: boolean;
   readonly params: z.ZodType;
   readonly result: z.ZodType;
+  /**
+   * Dispatchable but never advertised in `tools/list`.
+   *
+   * Diagnostics exist to interrogate a live host — which route actually fills a
+   * layer, whether an API is present on this build. They have to be reachable,
+   * and they must not be selectable by a planner: an operation a model can plan
+   * with is a promise the project then has to keep, and a probe is not one.
+   */
+  readonly diagnostic?: boolean;
 }
 
 type OperationDefinitionMap = { readonly [K in PhotoshopOpName]: OperationDefinition };
@@ -895,6 +1056,51 @@ export const OPERATIONS = {
     result: TextLayerInfoSchema,
   },
 
+  // ---------------------------------------------------------------- brushes
+  list_brushes: {
+    tool: 'photoshop.list_brushes',
+    title: 'List Brushes',
+    description:
+      'Report which brushes the running Photoshop exposes. Returns `available: false` with an empty list and a ' +
+      'reason on every current UXP host, because the brush engine is not reachable from a plugin. Do not treat ' +
+      'an empty list as a fault, and do not pick a brush name from it: `brushName` cannot change a stroke.',
+    category: 'image',
+    destructive: false,
+    requiresConfirmation: false,
+    params: DocumentTargetSchema,
+    result: ListBrushesResultSchema,
+  },
+  stroke_path: {
+    tool: 'photoshop.stroke_path',
+    title: 'Stroke Path',
+    description:
+      'Draw a stroke along a path. The path is rasterized by sweeping round discs of `brushSize` along it, so ' +
+      'the result has round ends and round corners and the requested width, but no brush tip texture. `curve` ' +
+      'segments are followed as real cubic Béziers. `simulatePressure` tapers both ends as if the pen pressed ' +
+      'down and lifted off. Paints onto the active layer unless `newLayer` is true. The stroke is verified by ' +
+      'sampling the canvas along the path before and after, so a reported success means pixels actually moved. ' +
+      'Prefer `paint_stroke` for freehand point lists.',
+    category: 'image',
+    destructive: false,
+    requiresConfirmation: false,
+    params: StrokePathParamsSchema,
+    result: BrushStrokeResultSchema,
+  },
+  paint_stroke: {
+    tool: 'photoshop.paint_stroke',
+    title: 'Paint Stroke',
+    description:
+      'Draw a freehand stroke through a list of points. `smoothing` (0-100) applies corner-cutting passes to round ' +
+      'off the polyline before it is drawn — raise it for a shaky mouse path, keep it at 0 for deliberate ' +
+      'straight segments. Paints onto the active layer unless `newLayer` is true. Verified by sampling the canvas ' +
+      'along the path, so a reported success means pixels actually moved.',
+    category: 'image',
+    destructive: false,
+    requiresConfirmation: false,
+    params: PaintStrokeParamsSchema,
+    result: BrushStrokeResultSchema,
+  },
+
   // ---------------------------------------------------------------- images
   place_image: {
     tool: 'photoshop.place_image',
@@ -1207,6 +1413,7 @@ export const OPERATIONS = {
     }),
     result: PreviewResultSchema,
   },
+
 } satisfies OperationDefinitionMap;
 
 // ---------------------------------------------------------------------------
@@ -1252,7 +1459,16 @@ export const ToolMetaSchema = z.object({
 });
 
 /** Tool metadata for the Studio UI and for prompt construction. */
-export const TOOL_META: readonly ToolMeta[] = OP_NAMES.map((op) => ({
+/**
+ * The catalogue handed to the planner and the Studio's tool list.
+ *
+ * Diagnostics are excluded. They live in the registry so the server can
+ * dispatch them, and they are reachable by name for whoever is interrogating a
+ * host — but a planner that can select an operation is making a promise the
+ * project has to keep, and a probe that mutates the document to answer a
+ * question is not one it should be choosing.
+ */
+export const TOOL_META: readonly ToolMeta[] = OP_NAMES.filter((op) => !(OPERATIONS[op] as OperationDefinition).diagnostic).map((op) => ({
   tool: OPERATIONS[op].tool,
   op,
   title: OPERATIONS[op].title,

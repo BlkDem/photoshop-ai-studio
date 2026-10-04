@@ -66,15 +66,22 @@ h4 {
 
 /* ---------------------------------------------------------------- layout */
 
+/* A column, not a row template: the offline banner is rendered only while the
+   orchestrator is unreachable, so a fixed `grid-template-rows` counted a row
+   that usually had nothing in it. The children then landed one row higher than
+   intended and an empty 220px band was left under the app. Children size
+   themselves here, so a conditional one cannot shift the rest. */
 .app {
-  display: grid;
-  grid-template-rows: auto auto 1fr minmax(220px, 38vh);
+  display: flex;
+  flex-direction: column;
   height: 100%;
+  min-height: 0;
 }
 
 .app__main {
   display: grid;
   grid-template-columns: 280px 1fr 400px;
+  flex: 1 1 auto;
   min-height: 0;
   border-top: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
@@ -191,6 +198,20 @@ h4 {
   gap: 2px;
   padding: 8px 8px 0;
   border-bottom: 1px solid var(--line);
+}
+
+/* Four labelled tabs with counters do not fit a 280px rail, and the overflow
+   clipped "Tools" mid-word. Clipping the tab instead only moved the damage onto
+   the counters, so the row wraps onto a second line and everything stays
+   readable: a counter you cannot read is worse than one extra row of chrome. */
+.rail__tabs {
+  flex-wrap: wrap;
+  row-gap: 0;
+}
+
+.rail__tab {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .rail__tab,
@@ -738,7 +759,12 @@ h4 {
 .bottom {
   display: flex;
   flex-direction: column;
-  min-height: 0;
+  /* Takes its share of the height without starving the panes above it, and never
+     collapses to nothing: at 38vh with a 220px floor it stayed a usable strip
+     on short windows. */
+  flex: 0 0 auto;
+  height: 38vh;
+  min-height: 220px;
   background: var(--bg-raised);
 }
 
@@ -1287,4 +1313,203 @@ h4 {
 
 .empty code {
   color: var(--text-dim);
+}
+
+/* --------------------------------------------------------- models panel */
+
+.meta--button {
+  cursor: pointer;
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: var(--radius);
+  padding: 2px 6px;
+  font: inherit;
+  color: var(--text-dim);
+}
+
+.meta--button:hover {
+  color: var(--text);
+  border-color: var(--line-strong);
+}
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 48px 24px;
+  background: rgb(0 0 0 / 55%);
+  overflow: auto;
+}
+
+.modal__panel {
+  width: min(880px, 100%);
+  max-height: calc(100vh - 96px);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-raised);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  box-shadow: 0 24px 60px rgb(0 0 0 / 45%);
+}
+
+.modal__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.modal__head h2 {
+  margin: 0;
+  font-size: 14px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.modal__body {
+  padding: 18px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.models__roles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+.models__role {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.models__role-label {
+  display: flex;
+  flex-direction: column;
+}
+
+.models__role-label span {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.input {
+  width: 100%;
+  padding: 7px 9px;
+  font: inherit;
+  color: var(--text);
+  background: #1b1e24;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+}
+
+.input:focus {
+  outline: none;
+  border-color: var(--accent-dim);
+}
+
+.models__list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.model {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  background: #1b1e24;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.model__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.model__meta,
+.model__probe {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.model__probe {
+  color: var(--accent);
+}
+
+.model__actions {
+  display: flex;
+  gap: 6px;
+  flex: none;
+}
+
+.btn--danger:hover:not(:disabled) {
+  border-color: #8c4048;
+  color: #ffc9ce;
+}
+
+.models__form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.models__form h3 {
+  margin: 0;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.models__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.field span {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.models__hint {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.models__form-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.banner--ok {
+  margin: 0;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: #bfe6c6;
+  background: #1d2a20;
+  border: 1px solid #2f4634;
+  border-radius: var(--radius);
 }

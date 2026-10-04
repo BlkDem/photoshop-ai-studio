@@ -1,7 +1,7 @@
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { request as httpRequest } from 'node:http';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -67,6 +67,10 @@ interface ToolResult {
   structuredContent?: { success?: boolean; data?: unknown; error?: { code: string; message: string; recoverable: boolean } };
 }
 
+/** A 1×1 PNG. Only its size header matters — the mock reads width/height, not pixels. */
+const TINY_PNG_BASE64 =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
 async function call(name: string, args: Record<string, unknown> = {}): Promise<ToolResult> {
   return (await client.callTool({ name, arguments: args })) as ToolResult;
 }
@@ -90,10 +94,17 @@ function expectFail(result: ToolResult, code?: string): { code: string; message:
 // ---------------------------------------------------------------------------
 
 describe('tools/list', () => {
-  it('advertises every registered tool', async () => {
+  it('advertises every tool the planner is allowed to use', async () => {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
-    expect(names).toEqual([...TOOL_NAME_LIST].sort());
+    // `tools/list` and the planner catalogue are different audiences, and only
+    // the latter is asserted to exclude diagnostics: the boundary that decides
+    // whether a model can *plan* with an operation. The MCP SDK's registerTool
+    // both registers and lists, so filtering `tools/list` would mean replacing
+    // its request handler — not worth it for an operation that is temporary and
+    // is marked destructive with mandatory confirmation. See the `diagnostic`
+    // flag on OperationDefinition.
+    expect(names.filter((n) => !n.includes('probe'))).toEqual([...TOOL_NAME_LIST].sort());
   });
 
   it('gives every tool a JSON Schema object input', async () => {
@@ -166,6 +177,24 @@ describe('tools/call — success', () => {
     expectOk(await call('photoshop.rename_layer', { layerName: 'Logo', name: 'Company Logo' }));
     const data = expectOk(await call('photoshop.get_layer', { layerName: 'Company Logo' })) as Record<string, unknown>;
     expect(data.name).toBe('Company Logo');
+  });
+
+  it('places an image from a workspace-relative path without doubling the directory', async () => {
+    // A planner writes `assets/logo.png`, and `assets` is also the default input
+    // directory. Resolving that path against the default dir as well produced
+    // `assets/assets/logo.png` — a file that does not exist, reported as
+    // FILE_NOT_FOUND against a path the caller never wrote. The mock and the UXP
+    // adapter must resolve input paths the same way, or the mock stops being a
+    // faithful stand-in for the real thing.
+    mkdirSync(join(workspaceDir, 'assets'), { recursive: true });
+    writeFileSync(join(workspaceDir, 'assets', 'logo.png'), Buffer.from(TINY_PNG_BASE64, 'base64'));
+
+    const data = expectOk(
+      await call('photoshop.place_image', { path: 'assets/logo.png', name: 'PlacedLogo' }),
+    ) as Record<string, unknown>;
+
+    expect(data.name).toBe('PlacedLogo');
+    expect((data as { width: number }).width).toBeGreaterThan(0);
   });
 
   it('supports the layer hierarchy', async () => {

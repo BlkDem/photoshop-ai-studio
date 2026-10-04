@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import {
+  ExpectationSchema,
   OPERATIONS,
   StudioException,
   TOOL_META_MAP,
@@ -44,6 +45,7 @@ export function buildPlan(input: BuildPlanInput): Plan {
 
   const steps: PlanStep[] = [];
   const confirmations: ConfirmationRequest[] = [];
+  const dropped: string[] = [];
 
   input.draft.steps.forEach((step, index) => {
     const meta = TOOL_META_MAP[step.tool];
@@ -57,8 +59,9 @@ export function buildPlan(input: BuildPlanInput): Plan {
     // Validate arguments now, before the user is asked to approve anything.
     const validated = validateToolArgs(step.tool, step.params);
 
-    const derived = mergeExpectations((step.expect ?? []) as Expectation[], op, validated);
     const stepId = `step-${index + 1}`;
+    const declared = validateDeclaredExpectations(step.expect, stepId, dropped);
+    const derived = mergeExpectations(declared, op, validated);
     const planStep: PlanStep = {
       id: stepId,
       tool: step.tool,
@@ -84,8 +87,48 @@ export function buildPlan(input: BuildPlanInput): Plan {
     route: input.route,
     requiresConfirmation: confirmations.length > 0,
     confirmations,
-    notes: [...(input.notes ?? []), ...(input.draft.notes ?? [])],
+    notes: [
+      ...(input.notes ?? []),
+      ...(input.draft.notes ?? []),
+      ...(dropped.map((d) => `Ignored a malformed expectation the planner declared (${d}).`)),
+    ],
   };
+}
+
+/**
+ * Keeps only the planner's expectations that actually parse.
+ *
+ * A model writes these by hand from a prose description, so it gets the shape
+ * wrong in ways that are easy to predict: `layerId`/`layerName` at the top
+ * level instead of inside `layer`, a `name` field the schema has never heard
+ * of, or a property that is not in the enum. Those objects used to reach the
+ * verification engine untouched, where reading `expectation.layer.layerId`
+ * threw a `TypeError` that surfaced as an opaque `INTERNAL` check failure —
+ * a broken *check*, reported as if the *work* had failed.
+ *
+ * Dropping them is safe rather than lenient: the derived expectations from the
+ * tool registry are merged in either way, so the step is still verified against
+ * something mechanical. The rejection is recorded in the plan notes so a plan
+ * that lost its own proof says so.
+ */
+function validateDeclaredExpectations(
+  declared: readonly unknown[] | undefined,
+  stepId: string,
+  dropped: string[],
+): Expectation[] {
+  if (!Array.isArray(declared)) return [];
+  const out: Expectation[] = [];
+  for (const [index, candidate] of declared.entries()) {
+    const parsed = ExpectationSchema.safeParse(candidate);
+    if (parsed.success) {
+      out.push(parsed.data);
+      continue;
+    }
+    const issue = parsed.error.issues[0];
+    const where = issue ? `${issue.path.join('.') || '(root)'} ${issue.message}` : 'unrecognised shape';
+    dropped.push(`${stepId} expectation #${index + 1}: ${where}`);
+  }
+  return out;
 }
 
 function validateToolArgs(tool: string, params: Record<string, unknown>): unknown {

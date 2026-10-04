@@ -1,4 +1,5 @@
 import type { DocumentSnapshot, ToolMeta } from '@photoshop-ai-studio/shared';
+import { OPERATIONS, TOOL_META_MAP } from '@photoshop-ai-studio/shared';
 import {
   ModelUnavailableError,
   SYSTEM_PREAMBLE,
@@ -28,6 +29,7 @@ export interface OpenAiCompatibleConfig {
   baseUrl: string;
   temperature: number;
   timeoutMs: number;
+  maxTokens: number;
   logger: { warn(input: { event: string; message: string; data?: unknown }): void };
 }
 
@@ -75,6 +77,12 @@ export class OpenAiCompatibleGateway implements ModelGateway {
           temperature: this.config.role === 'planner' ? this.config.temperature : 0,
           messages,
           response_format: { type: 'json_object' },
+          // Sent explicitly because leaving it to the provider is what breaks
+          // reasoning models. Space Bunny Alpha spends ~19k characters reasoning
+          // before it emits a token of JSON; with the provider default it hit
+          // `finish_reason: length` and returned `content: null`, which surfaced
+          // as "Model returned an empty completion" and a dead PLAN_INVALID run.
+          max_tokens: this.config.maxTokens,
         }),
         signal: AbortSignal.timeout(this.config.timeoutMs),
       });
@@ -97,11 +105,27 @@ export class OpenAiCompatibleGateway implements ModelGateway {
     }
 
     const payload = (await response.json()) as {
-      choices?: { message?: { content?: string } }[];
+      choices?: { finish_reason?: string | null; message?: { content?: string; reasoning?: string } }[];
     };
-    const content = payload.choices?.[0]?.message?.content;
+    const choice = payload.choices?.[0];
+    const content = choice?.message?.content;
     if (typeof content !== 'string' || content.trim() === '') {
-      throw new ModelUnavailableError('Model returned an empty completion', this.provider, this.config.model);
+      // A truncated completion and an empty one need different advice: the first
+      // is fixed by raising AI_MAX_TOKENS, the second by fixing the model.
+      if (choice?.finish_reason === 'length') {
+        const reasoned = typeof choice?.message?.reasoning === 'string' ? choice.message.reasoning.length : 0;
+        throw new ModelUnavailableError(
+          `Model used its whole ${this.config.maxTokens}-token budget reasoning without emitting JSON` +
+            `${reasoned ? ` (${reasoned} characters of reasoning)` : ''}. Raise AI_MAX_TOKENS.`,
+          this.provider,
+          this.config.model,
+        );
+      }
+      throw new ModelUnavailableError(
+        `Model returned an empty completion (finish_reason: ${choice?.finish_reason ?? 'unknown'})`,
+        this.provider,
+        this.config.model,
+      );
     }
     return content;
   }
@@ -182,7 +206,11 @@ export function plannerSystemPrompt(tools: readonly ToolMeta[]): string {
       const flags = [t.destructive ? 'DESTRUCTIVE' : null, t.requiresConfirmation ? 'needs-confirmation' : null]
         .filter(Boolean)
         .join(', ');
-      return `- ${t.tool}${flags ? ` [${flags}]` : ''}: ${t.description}`;
+      const params = renderParamShape(t.tool);
+      return [
+        `- ${t.tool}${flags ? ` [${flags}]` : ''}: ${t.description}`,
+        ...(params ? [`    params: ${params}`] : []),
+      ].join('\n');
     })
     .join('\n');
 
@@ -212,8 +240,122 @@ export function plannerSystemPrompt(tools: readonly ToolMeta[]): string {
     '- Do not include `photoshop.get_document` / `get_layers` as steps: the orchestrator already fetched the state.',
     '- `expect` entries are checked against a fresh snapshot after the plan finishes. Use kinds:',
     '  layer_exists | layer_absent | layer_property | document_property | layer_count | file_exists | custom.',
-    '- `photoshop.duplicate_document` must come first when you are deriving a variant of the current document.',
-].join('\n');
+'- `photoshop.duplicate_document` must come first when you are deriving a variant of the current document.',
+    '- The `params:` line under each tool is the exact accepted shape. An argument that is an object',
+    '  there must be passed as a nested object, never as a string.',
+    '- An argument marked `?` is optional: omit the key entirely when you do not have a value for it.',
+    '  Do not pass `null` for an omitted argument — `move_layer` with only `x` set must omit `y`,',
+    '  because `{"x": 10, "y": null}` is rejected while `{"x": 10}` is accepted.',
+  ].join('\n');
+}
+
+/**
+ * Renders a tool's parameter shape compactly enough to sit in a prompt.
+ *
+ * The planner was previously given only each tool's description, so it invented
+ * the shape of anything nested and got it wrong in ways the validator then
+ * rejected outright: `place_image` received `fit` as the string "820" where the
+ * schema wants `{"height": 820}`. The plan died on a shape mismatch rather than
+ * on anything about Photoshop, and the message the user saw
+ * (`Step arguments for photoshop.place_image are invalid`) gave no hint which
+ * argument was wrong or how.
+ *
+ * Zod v4 exposes the shape through `_def`, so this walks it rather than
+ * shipping a second hand-written description that could drift from the schema
+ * the validator actually enforces. Optional keys are marked, and defaults are
+ * shown so a model does not invent one where none exists.
+ */
+function renderParamShape(tool: string): string {
+  const meta = TOOL_META_MAP[tool];
+  if (!meta) return '';
+  const schema = OPERATIONS[meta.op]?.params as unknown;
+  const def = schemaDef(schema) as ZodDef | undefined;
+  // A tool's params are a ZodObject, whose def holds `{type, shape}` — the keys
+  // to render are in that `shape`, not on the def itself.
+  const shape = def?.shape as Record<string, unknown> | undefined;
+  if (!shape || typeof shape !== 'object') return '';
+  return Object.entries(shape)
+    .map(([key, value]) => `${key}${isOptional(value) ? '?' : ''}: ${describeParamType(value)}`)
+    .join(', ');
+}
+
+type ZodDef = {
+  type?: string;
+  innerType?: unknown;
+  /** ZodPipe input side: what the caller must supply, before any transform. */
+  in?: unknown;
+  shape?: Record<string, unknown>;
+  values?: unknown[];
+  entries?: unknown;
+  options?: unknown[];
+  element?: unknown;
+  valueType?: unknown;
+  value?: unknown;
+};
+
+function schemaDef(schema: unknown): unknown {
+  if (!schema || typeof schema !== 'object') return schema;
+  // Zod v4 exposes the parsed schema on `def`; `_def` is the v3 field and is
+  // absent here, so reading only `_def` silently yields an empty shape.
+  const parsed = schema as { def?: ZodDef; _def?: ZodDef };
+  return parsed.def ?? parsed._def ?? schema;
+}
+
+function isOptional(schema: unknown): boolean {
+  const def = schemaDef(schema) as ZodDef | undefined;
+  // A defaulted or optional field is one the planner may omit entirely.
+  return def?.type === 'optional' || def?.type === 'default';
+}
+
+function describeParamType(schema: unknown): string {
+  const def = schemaDef(schema) as ZodDef | undefined;
+  if (!def) return 'unknown';
+
+  // Unwrap the transparent wrappers so `ZodOptional<ZodObject>` reads as an object.
+  if (def.type === 'optional' || def.type === 'default') {
+    return describeParamType(def.innerType);
+  }
+
+  switch (def.type) {
+    case 'pipe': {
+      // A transform is invisible to the model: it sends what the schema accepts
+      // and the transform runs afterwards. Render the input side, or the type
+      // comes out as `pipe` and tells the planner nothing.
+      return describeParamType(def.in);
+    }
+    case 'object': {
+      const shape = (def.shape ?? {}) as Record<string, unknown>;
+      const inner = Object.entries(shape)
+        .map(([key, value]) => `${key}${isOptional(value) ? '?' : ''}: ${describeParamType(value)}`)
+        .join(', ');
+      return `{${inner}}`;
+    }
+    case 'array':
+      return `${describeParamType(def.element ?? def.valueType)}[]`;
+    case 'enum': {
+      const values = (def.values ?? (def.entries ? Object.values(def.entries as Record<string, unknown>) : [])).map((v) =>
+        JSON.stringify(v),
+      );
+      return values.length ? values.join(' | ') : 'string';
+    }
+    case 'literal':
+      return JSON.stringify(def.value) ?? 'string';
+    case 'number':
+      return 'number';
+    case 'boolean':
+      return 'boolean';
+    case 'string':
+      return 'string';
+    case 'record':
+      return 'object';
+    case 'union': {
+      const options = (def.options ?? []) as unknown[];
+      const rendered = options.map((o) => describeParamType(o)).filter((t) => t !== 'unknown');
+      return rendered.length ? rendered.join(' | ') : 'object';
+    }
+    default:
+      return def.type ?? 'unknown';
+  }
 }
 
 export function plannerUserPrompt(request: PlanRequest): string {
@@ -238,7 +380,10 @@ export function renderStateForPrompt(state: DocumentSnapshot | null): string {
   if (!state) return '(no document is currently open in Photoshop)';
   const doc = state.document;
   const lines = [
-    `document "${doc.name}" id=${doc.id} ${doc.width}×${doc.height} @${doc.resolution}ppi ${doc.colorMode}`,
+    // Quoted because `documentId` is a string in every tool schema. Rendering it
+    // bare taught the model to pass a number, and the plan died on
+    // INVALID_PARAMS for a value it had copied straight out of this line.
+    `document "${doc.name}" id="${doc.id}" ${doc.width}×${doc.height} @${doc.resolution}ppi ${doc.colorMode}`,
     `layers (bottom → top, ${state.layers.length}):`,
   ];
   const byId = new Map(state.layers.map((l) => [l.id, l]));

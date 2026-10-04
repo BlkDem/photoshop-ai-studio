@@ -6,6 +6,7 @@ import { ProjectPanel } from './components/ProjectPanel.js';
 import { Preview } from './components/Preview.js';
 import { Chat } from './components/Chat.js';
 import { BottomPanel } from './components/BottomPanel.js';
+import { ModelsPanel } from './components/ModelsPanel.js';
 import './styles/app.css';
 
 /**
@@ -23,6 +24,7 @@ export function App(): React.JSX.Element {
   const studio = useStudio();
   const [preview, setPreview] = useState<{ base64: string; mimeType: string } | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [modelsOpen, setModelsOpen] = useState(false);
 
   const loadPreview = useCallback(async () => {
     // The preview render is a Photoshop round trip, so it is fetched explicitly
@@ -66,6 +68,7 @@ export function App(): React.JSX.Element {
           void studio.reload();
           void loadPreview();
         }}
+        onOpenModels={() => setModelsOpen(true)}
       />
 
       {!studio.connected ? (
@@ -110,6 +113,8 @@ export function App(): React.JSX.Element {
         onSelectRun={(runId) => void studio.selectRun(runId)}
         selectedRunId={studio.activeRunId}
       />
+
+      {modelsOpen ? <ModelsPanel onClose={() => setModelsOpen(false)} /> : null}
     </div>
   );
 }

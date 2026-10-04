@@ -100,6 +100,16 @@ const env = {
   MOCK_PHOTOSHOP: 'true',
   MOCK_DEMO_DOCUMENT: 'true',
   LOG_LEVEL: process.env.SMOKE_VERBOSE ? 'debug' : 'error',
+  // Pin the planner to the offline gateway. The child processes load `.env`, so
+  // without this a developer's real provider leaks in and the assertions below —
+  // which expect the deterministic planner's exact 13-step plan — turn into a
+  // network test that fails for reasons unrelated to the code.
+  AI_PLANNER_PROVIDER: 'mock',
+  AI_PLANNER_MODEL: 'deterministic',
+  AI_VISION_PROVIDER: 'mock',
+  AI_VISION_MODEL: 'deterministic',
+  AI_FAST_PROVIDER: 'mock',
+  AI_FAST_MODEL: 'deterministic',
   MCP_PORT: String(MCP_PORT),
   PLUGIN_PORT: String(PLUGIN_PORT),
   ORCHESTRATOR_PORT: String(ORCH_PORT),

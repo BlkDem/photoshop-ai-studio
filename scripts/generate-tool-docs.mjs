@@ -78,7 +78,11 @@ function inputShape(op) {
   const schema = z.toJSONSchema(OPERATIONS[op].params, { io: 'input', unrepresentable: 'any' });
   const properties = Object.keys(schema.properties ?? {}).length;
   const required = (schema.required ?? []).length;
-  return required === 0 ? `${properties} props, all optional` : `${properties} props, ${required} required`;
+  // `list_brushes` takes no arguments at all, which would otherwise be described
+  // as "1 props, all optional" — wrong in two directions at once.
+  if (properties === 0) return 'no arguments';
+  const plural = properties === 1 ? 'prop' : 'props';
+  return required === 0 ? `${properties} ${plural}, all optional` : `${properties} ${plural}, ${required} required`;
 }
 
 const out = [];

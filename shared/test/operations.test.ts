@@ -30,9 +30,17 @@ import {
  * server, the plugin and the Studio all drift with them.
  */
 describe('operation registry', () => {
-  it('exposes one tool per operation', () => {
-    expect(OP_NAMES.length).toBe(TOOL_META.length);
-    expect(TOOL_NAME_LIST.length).toBe(OP_NAMES.length);
+  it('exposes one tool per operation, minus the diagnostics', () => {
+    // The registry is what the server can dispatch; the catalogue is what a
+    // planner is allowed to choose from. A diagnostic belongs to the first and
+    // not the second, so the counts are allowed to differ — and the difference
+    // has to be exactly the diagnostics.
+    const advertised = OP_NAMES.filter((op) => !(OPERATIONS[op] as { diagnostic?: boolean }).diagnostic);
+    expect(TOOL_META.length).toBe(advertised.length);
+    expect(TOOL_NAME_LIST.length).toBe(advertised.length);
+    for (const op of OP_NAMES.filter((o) => !advertised.includes(o))) {
+      expect(TOOL_NAME_LIST).not.toContain(`photoshop.${op}`);
+    }
   });
 
   it('names every tool photoshop.<op>', () => {

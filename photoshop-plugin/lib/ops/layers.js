@@ -57,6 +57,23 @@ function createLayer(ctx) {
         return translateBy(layer, targetX - current.x, targetY - current.y);
       })
       .then(function () {
+        // Measured on this build: `doc.createLayer()` and `doc.createPixelLayer()`
+        // both hand back a 0×0 layer, and the `width`/`height`/`fill` options are
+        // accepted and ignored — so `scaleTo` above returns early and the layer
+        // stays empty. It still has a name, still reports kind "pixel", and used
+        // to be returned as a success that passed every declared check, because
+        // no check measured area. That is precisely the false success this
+        // project exists to prevent, so it is reported as the failure it is.
+        var settled = ps.boundsOf(layer);
+        if (settled.width <= 0 || settled.height <= 0) {
+          throw StudioError(
+            'UNSUPPORTED_OPERATION',
+            'This Photoshop build creates every pixel layer empty (0×0) and ignores width, height and fill, ' +
+              'so there is nothing to put pixels into. Use photoshop.place_image to bring artwork in, or ' +
+              'photoshop.apply_image to paste generated pixels.',
+            { details: { requested: { width: width, height: height }, actual: { width: settled.width, height: settled.height } } },
+          );
+        }
         if (typeof params.opacity === 'number') layer.opacity = params.opacity;
         if (typeof params.visible === 'boolean') layer.visible = params.visible;
         return describe(doc, layer);

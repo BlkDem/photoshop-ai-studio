@@ -91,7 +91,12 @@ function asModal(commandName, fn) {
 
 function normalizeUnknown(err, context) {
   var message = (err && err.message) || String(err);
-  return StudioError('STEP_FAILED', context + ': ' + message, { recoverable: false });
+  var opts = { recoverable: false };
+  // Preserve nested details so a StudioError thrown inside the modal scope keeps
+  // its diagnostic payload (a stroke reports how many stamps it filled and how
+  // many samples moved) instead of being silently stripped.
+  if (err && err.details) opts.details = err.details;
+  return StudioError('STEP_FAILED', context + ': ' + message, opts);
 }
 
 // ---------------------------------------------------------------------------
@@ -1266,7 +1271,6 @@ module.exports = {
   currentWorkspaceGrant: currentWorkspaceGrant,
   forgetWorkspaceGrant: forgetWorkspaceGrant,
   stageEntry: stageEntry,
-  entryForWriting: entryForWriting,
   app: app,
   action: action,
   core: core,

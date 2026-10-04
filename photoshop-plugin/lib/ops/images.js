@@ -21,6 +21,7 @@
 var ps = require('../ps.js');
 var StudioError = require('../errors.js').StudioError;
 var layers = require('./layers.js');
+var Logger = require('../logger.js').Logger;
 
 /** `place_image` */
 function placeImage(ctx) {
@@ -29,7 +30,19 @@ function placeImage(ctx) {
 
   return openSource(params, ctx.config).then(function (source) {
     return placeInto(doc, source).then(function (placed) {
-      if (params.name) placed.name = params.name;
+      // A rename must not fail the placement. Placing into a document whose only
+      // layer is the Background replaces that layer, and Photoshop refuses to
+      // rename a Background outright — so `place_image` with a `name` died with
+      // "You cannot change the Background layer's name" *after* the pixels were
+      // already there, and every later step that named the layer failed too.
+      // The name is reported as whatever Photoshop ended up calling it.
+      if (params.name) {
+        try {
+          if (String(placed.name) !== String(params.name)) placed.name = params.name;
+        } catch (err) {
+          Logger.warn('placed layer kept the name Photoshop gave it: ' + ((err && err.message) || String(err)));
+        }
+      }
 
       var bounds = ps.boundsOf(placed);
       var fitted = params.fit && (params.fit.width || params.fit.height)

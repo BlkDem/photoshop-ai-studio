@@ -44,6 +44,18 @@ export class UxpRemoteAdapter implements PhotoshopAdapter {
   }
 
   /**
+   * Diagnostics go straight down the bridge.
+   *
+   * They have no entry in the dispatch table by design — a mock must never be
+   * able to answer "which route actually fills a layer" — so this is the only
+   * path that can reach them, and only an adapter talking to a real Photoshop
+   * has one.
+   */
+  diagnostic(op: string, params: unknown): Promise<unknown> {
+    return this.send(op, params);
+  }
+
+  /**
    * Rewrites every `path` in an operation payload to its workspace-relative form.
    *
    * The bridge carries relative paths on purpose: the plugin can be on another
@@ -316,6 +328,20 @@ export class UxpRemoteAdapter implements PhotoshopAdapter {
 
   async setTextColor(sel: ParamsOf<'set_text_color'>): Promise<ResultOf<'set_text_color'>> {
     return (await this.send('set_text_color', sel)) as ResultOf<'set_text_color'>;
+  }
+
+  // --- brushes ---------------------------------------------------------------
+
+  async listBrushes(params: ParamsOf<'list_brushes'>): Promise<ResultOf<'list_brushes'>> {
+    return (await this.send('list_brushes', params)) as ResultOf<'list_brushes'>;
+  }
+
+  async strokePath(params: ParamsOf<'stroke_path'>): Promise<ResultOf<'stroke_path'>> {
+    return (await this.send('stroke_path', params)) as ResultOf<'stroke_path'>;
+  }
+
+  async paintStroke(params: ParamsOf<'paint_stroke'>): Promise<ResultOf<'paint_stroke'>> {
+    return (await this.send('paint_stroke', params)) as ResultOf<'paint_stroke'>;
   }
 
   // --- images --------------------------------------------------------------

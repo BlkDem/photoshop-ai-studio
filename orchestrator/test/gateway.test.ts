@@ -1,9 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { buildSnapshot, type DocumentSnapshot, type ToolMeta } from '@photoshop-ai-studio/shared';
 import { TOOL_META } from '@photoshop-ai-studio/shared';
 import { DeterministicGateway } from '../src/gateway/deterministic.js';
-import { coercePlanDraft, parseJsonLoose, plannerSystemPrompt, plannerUserPrompt, renderStateForPrompt } from '../src/gateway/openai-compatible.js';
+import { OpenAiCompatibleGateway, coercePlanDraft, parseJsonLoose, plannerSystemPrompt, plannerUserPrompt, renderStateForPrompt } from '../src/gateway/openai-compatible.js';
 import { createGateway } from '../src/gateway/index.js';
 import { loadConfig } from '../src/config.js';
 import { createLogger } from '@photoshop-ai-studio/shared/node';
@@ -99,6 +99,28 @@ describe('prompt construction', () => {
       expect(prompt, tool.tool).toContain(tool.tool);
     }
     expect(prompt).toContain('photoshop.delete_layer [DESTRUCTIVE, needs-confirmation]');
+  });
+
+  it('gives the planner the shape of every argument, not just the description', () => {
+    // The planner was shown `tool: description` and nothing else, so it invented
+    // the shape of anything nested. `place_image` came back with `fit` as the
+    // string "820" where the schema wants `{"height": 820}`, and the run died on
+    // INVALID_PARAMS with a message that never said which argument was wrong.
+    const prompt = plannerSystemPrompt(TOOL_META);
+
+    // `documentId` accepts a number because Photoshop reports ids numerically and a
+    // model copies what it was shown; the renderer must unwrap the transform to
+    // say so, or it prints `pipe` and the planner learns nothing.
+    expect(prompt).toContain('params: documentId?: string | number, path: string, name?: string, fit?: {width?: number, height?: number');
+    // Nested objects must stay objects — that is the exact thing it got wrong.
+    expect(prompt).toContain('layer: {layerId?: number, layerName?: string}, group: {layerId?: number, layerName?: string}');
+    // Colour accepts both spellings, and the model needs to see both.
+    expect(prompt).toMatch(/color: \{r: number, g: number, b: number\} \| string/);
+
+    // A shape it could not resolve would send the model guessing again, so an
+    // unrendered type is a regression rather than a cosmetic gap.
+    expect(prompt, 'every parameter resolved to a concrete type').not.toContain('unknown');
+    expect(prompt, 'no parameter rendered as an opaque wrapper').not.toContain(': pipe');
   });
 
   it('renders the document state as an indented tree', () => {
@@ -288,5 +310,59 @@ describe('gateway factory', () => {
   it('configures the three roles independently', () => {
     const roles = loadConfig().roles;
     expect(Object.keys(roles).sort()).toEqual(['fast', 'planner', 'vision']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('OpenAI-compatible gateway over HTTP', () => {
+  const logger = { warn: () => {} };
+
+  /** Answers every chat completion with `payload`, and records what was sent. */
+  const stubFetch = (payload: unknown): { sent: () => Record<string, unknown> | undefined } => {
+    const calls: Record<string, unknown>[] = [];
+    vi.stubGlobal('fetch', async (_url: string, init?: RequestInit) => {
+      calls.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return new Response(JSON.stringify(payload), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    return { sent: () => calls.at(-1) };
+  };
+
+  const gateway = (maxTokens = 8192) =>
+    new OpenAiCompatibleGateway({
+      role: 'planner',
+      model: 'test-model',
+      apiKey: 'k',
+      baseUrl: 'https://example.invalid/v1',
+      temperature: 0.1,
+      timeoutMs: 1000,
+      maxTokens,
+      logger,
+    });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('sends an explicit max_tokens', async () => {
+    // Left to the provider it is what breaks reasoning models: Space Bunny Alpha
+    // spends ~19k characters reasoning before its first token of JSON, so the
+    // provider default truncated it to `content: null` and the run died as
+    // PLAN_INVALID with no indication why.
+    const fetchStub = stubFetch({ choices: [{ message: { content: '{"goal":"x","steps":[]}' } }] });
+    await gateway().plan({ userRequest: 'x', state, tools });
+    expect(fetchStub.sent().max_tokens).toBe(8192);
+  });
+
+  it('explains a completion that ran out of budget instead of calling it empty', async () => {
+    // These need opposite advice — raise the ceiling vs. fix the model — so
+    // reporting both as "empty completion" wasted the only clue there was.
+    stubFetch({ choices: [{ finish_reason: 'length', message: { content: null, reasoning: 'thinking…' } }] });
+    await expect(gateway().plan({ userRequest: 'x', state, tools })).rejects.toThrow(/budget.*Raise AI_MAX_TOKENS/s);
+  });
+
+  it('still reports a genuinely empty completion as such', async () => {
+    stubFetch({ choices: [{ finish_reason: 'stop', message: { content: '' } }] });
+    await expect(gateway().plan({ userRequest: 'x', state, tools })).rejects.toThrow(/empty completion \(finish_reason: stop\)/);
   });
 });

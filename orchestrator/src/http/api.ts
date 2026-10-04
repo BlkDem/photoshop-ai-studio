@@ -2,7 +2,13 @@ import type { Server } from 'node:http';
 
 import express, { type Express, type NextFunction, type Request, type Response } from 'express';
 
-import { ChatRequestSchema, TOOL_META, toStudioError } from '@photoshop-ai-studio/shared';
+import {
+  AssignRoleRequestSchema,
+  ChatRequestSchema,
+  ModelProfileInputSchema,
+  TOOL_META,
+  toStudioError,
+} from '@photoshop-ai-studio/shared';
 import type { ChatMessage, StudioError, StudioEvent } from '@photoshop-ai-studio/shared';
 import { type LogBus } from '@photoshop-ai-studio/shared/node';
 import type { Logger } from '@photoshop-ai-studio/shared/node';
@@ -77,6 +83,55 @@ export function createApiApp(options: ApiOptions): { app: Express; events: Event
       tools: TOOL_META.filter((t) => advertised.length === 0 || advertised.includes(t.tool)),
       mcp: { connected: advertised.length > 0, url: client.url, toolCount: advertised.length, error },
     });
+  });
+
+  // --- model registry ------------------------------------------------------
+
+  /**
+   * Add, edit, remove and route LLMs.
+   *
+   * Keys go in through these endpoints and never come back out: every response is
+   * built from `publicView()`, which drops the credential, and the browser is
+   * told only whether one is set. They also cannot be read back to be edited, so
+   * editing a profile without retyping its key keeps the stored one.
+   */
+  app.get('/api/models', (_req, res) => {
+    res.json(orchestrator.listModels());
+  });
+
+  app.post('/api/models', (req, res) => {
+    const parsed = ModelProfileInputSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: { code: 'INVALID_PARAMS', message: parsed.error.issues[0]?.message ?? 'invalid model', recoverable: false } });
+    }
+    res.status(201).json(orchestrator.addModel(parsed.data));
+  });
+
+  app.patch('/api/models/:id', (req, res) => {
+    const parsed = ModelProfileInputSchema.partial().safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: { code: 'INVALID_PARAMS', message: parsed.error.issues[0]?.message ?? 'invalid model', recoverable: false } });
+    }
+    res.json(orchestrator.updateModel(req.params.id!, parsed.data));
+  });
+
+  app.delete('/api/models/:id', (req, res) => {
+    orchestrator.removeModel(req.params.id!);
+    res.status(204).end();
+  });
+
+  app.post('/api/models/:id/assign', (req, res) => {
+    const parsed = AssignRoleRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: { code: 'INVALID_PARAMS', message: parsed.error.issues[0]?.message ?? 'invalid role', recoverable: false } });
+    }
+    orchestrator.assignModelRole(parsed.data.role, parsed.data.profileId);
+    res.json(orchestrator.listModels());
+  });
+
+  /** A real completion, not a socket check: several endpoints answer `/models` and refuse the actual call. */
+  app.post('/api/models/:id/probe', async (req, res) => {
+    res.json(await orchestrator.probeModel(req.params.id!));
   });
 
   // --- chat / runs ---------------------------------------------------------
@@ -285,17 +340,51 @@ function clampLimit(value: unknown, fallback: number): number {
   return Math.min(500, Math.max(1, parsed));
 }
 
-function errorHandler(err: Error & { status?: number; statusCode?: number }, _req: Request, res: Response, _next: NextFunction): void {
+/**
+ * Reports a failed request.
+ *
+ * A `StudioException` already knows what went wrong and whether retrying could
+ * help; discarding that in favour of a blanket `INTERNAL` told the Studio a
+ * rejected request had failed on the server. The status is derived from the code
+ * so a wrong argument comes back as a 400 the client can act on, and only a
+ * genuine fault stays a 5xx.
+ */
+function errorHandler(err: Error & { status?: number; statusCode?: number; code?: StudioError['code']; recoverable?: boolean }, _req: Request, res: Response, _next: NextFunction): void {
   if (res.headersSent) return;
-  const status = err.status ?? err.statusCode ?? 500;
+  const status = err.status ?? err.statusCode ?? statusForCode(err.code);
   const body: { error: StudioError } = {
     error: {
-      code: status === 404 ? 'INVALID_PARAMS' : 'INTERNAL',
+      code: status === 404 ? 'INVALID_PARAMS' : (err.code ?? 'INTERNAL'),
       message: err.message,
-      recoverable: status < 500,
+      recoverable: err.recoverable ?? status < 500,
     },
   };
   res.status(status).json(body);
+}
+
+/** Client fault → 4xx, everything else → 5xx. */
+function statusForCode(code: StudioError['code'] | undefined): number {
+  if (!code) return 500;
+  switch (code) {
+    case 'INVALID_PARAMS':
+    case 'UNKNOWN_TOOL':
+    case 'UNSUPPORTED_OPERATION':
+    case 'UNSUPPORTED_FORMAT':
+    case 'INVALID_COLOR':
+      return 400;
+    case 'MODEL_UNAVAILABLE':
+      return 503;
+    case 'FILE_NOT_FOUND':
+    case 'DOCUMENT_NOT_FOUND':
+    case 'LAYER_NOT_FOUND':
+    case 'GROUP_NOT_FOUND':
+      return 404;
+    case 'NOT_CONNECTED':
+    case 'WORKSPACE_NOT_GRANTED':
+      return 409;
+    default:
+      return 500;
+  }
 }
 
 export type { ChatMessage, Server };

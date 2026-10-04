@@ -36,9 +36,23 @@ let mcpServer: Server;
 let client: McpClient;
 let events: { publish: (event: unknown) => void };
 
-/** Build a fresh orchestrator against the shared MCP server. */
+/**
+ * Build a fresh orchestrator against the shared MCP server.
+ *
+ * The model roles are pinned to the deterministic gateway rather than inherited
+ * from `loadConfig()`. `loadConfig` reads the developer's `.env`, so without this
+ * the suite silently ran against whatever provider that file names — these tests
+ * assert on exact plan steps and error codes, so a real planner turns them into
+ * a network test that fails for reasons unrelated to the code, and passes on a
+ * machine with no key configured at all.
+ */
 function makeOrchestrator(overrides: Partial<OrchestratorConfig> = {}): Orchestrator {
   const base = loadConfig();
+  const offline: OrchestratorConfig['roles'] = {
+    planner: { role: 'planner', provider: 'mock', model: 'deterministic', apiKey: undefined, baseUrl: undefined },
+    vision: { role: 'vision', provider: 'mock', model: 'deterministic', apiKey: undefined, baseUrl: undefined },
+    fast: { role: 'fast', provider: 'mock', model: 'deterministic', apiKey: undefined, baseUrl: undefined },
+  };
   const config: OrchestratorConfig = {
     ...base,
     mcpUrl,
@@ -46,6 +60,7 @@ function makeOrchestrator(overrides: Partial<OrchestratorConfig> = {}): Orchestr
     logLevel: 'error',
     logFile: null,
     maxRepairAttempts: 2,
+    roles: offline,
     ...overrides,
   };
   const logger = createLogger({ source: 'orchestrator', level: 'error', console: false });
@@ -414,6 +429,40 @@ describe('history', () => {
     expect(record?.plan).toBeNull();
   });
 
+  it('surfaces the planner’s own reason instead of a canned refusal', async () => {
+    // A planner asked for something impossible ("сделай салют") answers with an
+    // empty plan *and* a note saying which tool is missing. That note used to be
+    // appended after a canned sentence that returned first, so it never
+    // survived: the user was told the tools could not turn it into a plan and
+    // asked which layer to change, when the real answer was that no drawing
+    // tool exists at all.
+    const orchestrator = makeOrchestrator();
+    // A gateway that declines with a reason, standing in for a model that
+    // recognises the request is impossible.
+    const declining = {
+      role: 'planner' as const,
+      provider: 'mock' as const,
+      model: 'deterministic',
+      plan: async () => ({
+        goal: 'fireworks',
+        steps: [],
+        notes: ['There is no tool in the Photoshop set for drawing vector shapes or generating new pixels.'],
+      }),
+      analyze: async () => ({ text: 'I could not turn that into a plan with the available tools.' }),
+      verify: async () => ({ passed: true, reason: 'n/a' }),
+    };
+    (orchestrator as unknown as { gateways: Record<string, unknown> }).gateways.planner = declining;
+
+    const { message, run } = await orchestrator.submit({ sessionId: 'test', message: 'сделай салют' });
+
+    expect(message).toContain('no tool');
+    // The canned text that blamed the tools and asked about layers must not
+    // displace the reason.
+    expect(message).not.toContain('Which layer');
+    expect(run.status).toBe('failed');
+    expect(run.error?.message).toContain('no tool');
+  });
+
   it('persists history to disk as JSONL', async () => {
     const orchestrator = makeOrchestrator();
     await run(orchestrator, 'hide Background');
@@ -460,12 +509,14 @@ const NOT_DERIVABLE: Record<string, string> = {
   merge_visible_layers: 'the layer count drops by an unknown amount, depending on grouping',
   close_document: 'the check would be that the document is gone, which no property can express',
   set_layer_locking: 'setLocking is accepted but no flag is readable back: layer.locked stays false either way',
+  stroke_path: 'the ink is pixels and no snapshot field reports a pixel footprint; the adapter samples the canvas along the path instead, so the proof happens at execution',
+  paint_stroke: 'the ink is pixels and no snapshot field reports a pixel footprint; the adapter samples the canvas along the path instead, so the proof happens at execution',
 };
 
 /** Read-only tools: there is no post-condition because nothing changed. */
 const READ_ONLY = new Set([
   'get_document', 'get_document_info', 'get_layers', 'get_layer', 'get_text_layer', 'get_documents',
-  'get_capabilities', 'render_preview', 'sample_color', 'list_fonts',
+  'get_capabilities', 'render_preview', 'sample_color', 'list_fonts', 'list_brushes',
 ]);
 
 describe('every mutating tool has a mechanical post-condition', () => {
@@ -568,7 +619,7 @@ describe('every mutating tool has a mechanical post-condition', () => {
     expect(deriveExpectations('modify_selection', { action: 'deselect' } as never)[0]).toMatchObject({ equals: false });
   });
 
-  it('gives the three content-dependent tools no invented check', () => {
+  it('gives every tool with no derivable post-condition no invented one', () => {
     for (const [op, reason] of Object.entries(NOT_DERIVABLE)) {
       expect(deriveExpectations(op as never, {} as never), `${op}: ${reason}`).toEqual([]);
     }

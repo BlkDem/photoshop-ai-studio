@@ -4,7 +4,7 @@ import { join } from 'node:path';
 
 import { afterAll, describe, expect, it } from 'vitest';
 
-import { buildSnapshot, type DocumentSnapshot, type Expectation, type LayerInfo, type TextLayerInfo } from '@photoshop-ai-studio/shared';
+import { buildSnapshot, deriveExpectations, type DocumentSnapshot, type Expectation, type LayerInfo, type TextLayerInfo } from '@photoshop-ai-studio/shared';
 import { safeVerify, verifyState } from '../src/state/verification.js';
 import { buildPlan } from '../src/execution/plan-builder.js';
 import { applyDecisions, evaluateSafety } from '../src/execution/safety.js';
@@ -326,6 +326,46 @@ describe('plan builder', () => {
       maxSteps: 24,
     });
     expect(plan.steps[0]?.expect.filter((e) => e.kind === 'layer_property')).toHaveLength(1);
+  });
+
+  it('drops a malformed planner expectation instead of passing it to the verifier', () => {
+    // A model writes these from a prose description and gets the shape wrong in
+    // predictable ways: the selector fields at the top level rather than nested
+    // under `layer`, a `name` key the schema has no field for, a property outside
+    // the enum. Unvalidated, those reached the VerificationEngine as-is, where
+    // reading `expectation.layer.layerId` threw a TypeError and surfaced as an
+    // opaque `INTERNAL` check failure — a broken *check* reported as if the *work*
+    // had failed, which sent the run into the repair loop for no reason.
+    const plan = buildPlan({
+      draft: {
+        goal: 'x',
+        steps: [
+          {
+            tool: 'photoshop.set_layer_visibility',
+            params: { layerName: 'Logo', visible: false },
+            expect: [
+              { kind: 'layer_property', layerId: 2, property: 'visible', equals: false },
+              { kind: 'layer_exists', name: 'Logo' },
+              { kind: 'layer_property', layer: { layerName: 'Logo' }, property: 'bounds.x', equals: 10 },
+              { kind: 'layer_property', layer: { layerName: 'Logo' }, property: 'visible', equals: false, tolerance: 0 },
+            ] as never,
+          },
+        ],
+      },
+      model,
+      route: 'llm',
+      maxSteps: 24,
+    });
+
+    // The three malformed entries are gone; the one well-formed entry survives.
+    expect(plan.steps[0]?.expect).toEqual([
+      { kind: 'layer_property', layer: { layerName: 'Logo' }, property: 'visible', equals: false, tolerance: 0 },
+    ]);
+    // The derived expectation is still there, so the step is still verified
+    // against something mechanical rather than silently unchecked.
+    expect(deriveExpectations('set_layer_visibility', { layerName: 'Logo', visible: false })).toHaveLength(1);
+    // And the loss is reported instead of being invisible.
+    expect(plan.notes.filter((n) => /malformed expectation/.test(n))).toHaveLength(3);
   });
 
   it('rejects an unknown tool', () => {

@@ -22,6 +22,7 @@ var textOps = require('./ops/text.js');
 var imageOps = require('./ops/images.js');
 var capabilityOps = require('./ops/capabilities.js');
 var filterOps = require('./ops/filters.js');
+var brushOps = require('./ops/brush.js');
 
 /** op name → (ctx) => Promise<result>. `ctx` is {params, config, documentId}. */
 var OPERATIONS = {
@@ -78,6 +79,11 @@ var OPERATIONS = {
   place_image: imageOps.place_image,
   resize_layer: imageOps.resize_layer,
 
+  // brushes
+  list_brushes: brushOps.list_brushes,
+  stroke_path: brushOps.stroke_path,
+  paint_stroke: brushOps.paint_stroke,
+
   // canvas
   resize_canvas: canvasOps.resize_canvas,
   crop_document: canvasOps.crop_document,
@@ -102,8 +108,10 @@ var READ_ONLY = {
   get_layers: true,
   get_layer: true,
   get_text_layer: true,
+  list_brushes: true,
 };
 
+/** The advertised tool surface: exactly what the shared registry declares. */
 var SUPPORTED = Object.keys(OPERATIONS);
 
 /**
@@ -236,6 +244,9 @@ function commandNameFor(op) {
     export_jpg: 'Export JPEG',
     save_psd: 'Save PSD',
     render_preview: 'Render preview',
+    list_brushes: 'List brushes',
+    stroke_path: 'Stroke path',
+    paint_stroke: 'Paint stroke',
   };
   return 'AI Studio: ' + (names[op] || op);
 }
