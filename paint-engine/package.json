@@ -1,0 +1,22 @@
+{
+  "name": "@photoshop-ai-studio/paint-engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "LLM-agnostic painting engine: turns a structured Painting Plan into semantic strokes and batched Photoshop paint operations.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "zod": "^4.6.5"
+  }
+}

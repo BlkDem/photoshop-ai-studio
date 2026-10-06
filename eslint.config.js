@@ -23,6 +23,10 @@ export default tseslint.config(
       'studio/dist/**',
       'tmp/**',
       'workspace/**',
+      // Local diagnostic probes, kept deliberately untracked and out of the
+      // shipped plugin. They call Photoshop/UXP globals on purpose, so linting them
+      // reports exactly the thing they exist to do.
+      'scripts/probes/**',
       'data/**',
       '.eslintcache',
       // Agent scratch worktrees are full copies of this repo checked out inside
@@ -37,7 +41,7 @@ export default tseslint.config(
 
   // ---------------------------------------------------------------- Node code
   {
-    files: ['shared/**/*.ts', 'mcp-server/**/*.ts', 'orchestrator/**/*.ts', 'vitest.config.ts'],
+    files: ['shared/**/*.ts', 'paint-engine/**/*.ts', 'mcp-server/**/*.ts', 'orchestrator/**/*.ts', 'vitest.config.ts'],
     extends: [tseslint.configs.recommended],
     languageOptions: {
       ecmaVersion: 2023,
