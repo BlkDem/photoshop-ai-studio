@@ -410,16 +410,35 @@ therefore directionally right and numerically suspect.
 visible ring, each glaze reads as a long horizontal tube, and there is one bad
 vertical stroke through the middle of the frame.
 
-The rings are the important finding. A synthesized tip is concentric ellipse fills
-with falling alpha, and in Photoshop the outer edge of the largest disc is a visible
-boundary — a stepped approximation to a soft edge, with the steps showing. It is
-worst against a light ground, which is why the white canvas that §5.2 introduced
-made it worse rather than better.
+The rings are the important finding, and **the obvious fix for them is wrong.**
 
-That is brush work, not recipe work: more `steps`, a lower `outerAlpha`, or both.
-It is the single highest-value fix available and it is in the tip model rather than
-in anything the Art Director controls. The one note the critic did raise —
-`focal-emphasis` at 0.44, the ship not standing out — is real and is recipe work.
+The first hypothesis was that `outerAlpha` was too high: `tipRings` puts the
+outermost disc at that weight, so at `0.35` the alpha jumps from nothing to a third
+of full within a pixel of the rim, and a step discontinuity at the rim is exactly
+what a visible ring is. Dropping `outerAlpha` to 0.03–0.08 and raising `steps` to
+5–7 was tried in real Photoshop. It did not remove the rings. It raised contrast
+0.85 → 0.93 and coverage 76% → 80%, and it caused five strokes to start failing
+verification — fainter stamps, and the sampled pixels no longer changed, so
+`paint_strokes` reported them as `STEP_FAILED`. Reverted rather than committed: a
+change that misses its stated goal and breaks five strokes is worse than no change.
+
+**The cause is structural.** A synthesized tip is a handful of concentric filled
+ellipses. Six discs make six bands, whatever the alphas are — a step function cannot
+be a ramp, and lowering the step height just makes the bands faint rather than
+fewer. The rings are not an artefact of the alphas; they are what a discrete
+approximation to a radial gradient looks like when there are six of them.
+
+The fix is therefore not a number in the brush catalog. It is a different fill:
+a **radial gradient** from the colour at the centre to fully transparent at the rim,
+which is smooth by construction and is one `batchPlay` call instead of six. Nothing
+in the current fill path can express it, because every fill is a solid colour on a
+selection. That is a new primitive in `photoshop-plugin/lib/ops/brush.js` plus a
+matching ramp in `tipRings`' place, and it is the highest-value piece of work left
+in the painting engine — more valuable than any recipe, because it changes what
+every mark in every picture looks like.
+
+The one note the critic raised that *is* recipe work: `focal-emphasis` at 0.44, the
+ship not standing out from the water behind it.
 
 ## 6. Working on this
 
