@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.31.0",
+    "@photoshop-ai-studio/paint-engine": "*",
     "@photoshop-ai-studio/shared": "*",
     "express": "^5.2.1",
     "zod": "^4.6.5"

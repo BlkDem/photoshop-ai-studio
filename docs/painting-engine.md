@@ -25,6 +25,7 @@ as real pixels on a real paint layer, with a genuinely soft edge.
 | ArtDirector (request → PaintingPlan) | **not built** |
 | Orchestrator wiring / checkpoint guard | **not built** |
 | Studio PAINT mode | **not built** |
+| Orchestrator plan building for painting | built and tested; executor mapping not done |
 | VisionCritic + repair loop | **not built** |
 
 Tests: **565 passing** (23 files), identical in both checkouts. Lint is clean except
@@ -270,11 +271,35 @@ Two engine bugs did turn up while chasing this, both fixed and covered:
   rather than by the request, and a recipe asking for a sky at full strength got
   whatever wash the preset happened to define.
 
-### 5.3 Orchestrator wiring
+### 5.3 Orchestrator wiring — **plan building done, execution not hooked up**
 
-- checkpoint / duplicate guard before a paint run (§25)
-- bounded iterations, `PAINT_MAX_ITERATIONS=3`
-- progress events on the existing NDJSON stream
+`buildPaintPlan()` in `orchestrator/src/execution/painting.ts` expands a request
+into ordinary `Plan` steps: one `duplicate_document` checkpoint, then one
+`paint_strokes` step per layer, bottom first. 15 tests.
+
+**Why it expands rather than adding a "paint" step type.** A `PlanStep` is one MCP
+tool call, and the executor, the safety gate, the approval UI and the verification
+pass all work off that. A painting that ran outside that machinery would be invisible
+to every one of them — no approval, no gate, no check. Expanding at plan-build time
+keeps the invariant and makes the result a plan a person can read before anything
+touches the document.
+
+The checkpoint is not optional. `suspendHistory` cannot span more than one bridge
+request (ADR-014), so thousands of fills cannot be bracketed in an undo group: a
+painting that fails halfway leaves marks on the document with no way back. Every
+painting runs against a duplicate, and the duplicate is left in place rather than
+flattened, so the user can see what happened and choose.
+
+**Not yet done:** the executor does not resolve the duplicate's id and redirect the
+paint steps at it, and the painting steps currently address `'active'`. That is the
+one real gap and it is why painting is not reachable from `submit()` yet. Plans are
+data, so a step cannot know an id that does not exist until the checkpoint above it
+has run — the executor has to carry the mapping, and that is a change to the
+executor rather than to the plan builder.
+
+Still to do here: the executor's checkpoint-id mapping described above, bounded
+iterations (`PAINT_MAX_ITERATIONS=3`), and progress events on the existing NDJSON
+stream.
 
 ### 5.4 Studio PAINT mode
 
