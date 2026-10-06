@@ -146,7 +146,7 @@ writes `config.json` back for you.
 
    ```text
    MCP (Streamable HTTP) listening on http://127.0.0.1:3001/mcp
-   UXP bridge listening on ws://localhost:3002/bridge
+   UXP bridge listening on port 3002/bridge (dual-stack)
    ```
 
 2. In the **UXP Developer Tool**: **Add Plugin…** → select

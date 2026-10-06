@@ -91,9 +91,22 @@ export class PluginBridge {
 
   async start(): Promise<void> {
     if (this.wss) return;
-    this.wss = new WebSocketServer({ port: this.options.port, host: this.options.host, path: PLUGIN_ROUTE });
+
+    // Bound without a host on purpose, so Node listens on `::` with IPv4-mapped
+    // addresses in and the socket answers on both families.
+    //
+    // This matters because `localhost` resolves to `::1` before `127.0.0.1` on some
+    // hosts, and the plugin has to dial `localhost` — UXP's manifest parser
+    // discards IP-literal hosts before permission matching (ADR-001), so `localhost`
+    // is the only address the plugin may use. Dual-stack means that name cannot
+    // resolve to a family nothing is listening on.
+    const bindHost = this.options.host === '0.0.0.0' || this.options.host === '::' ? undefined : this.options.host;
+    this.wss = new WebSocketServer({ port: this.options.port, host: bindHost, path: PLUGIN_ROUTE });
     this.wss.on('listening', () => {
-      this.logger.info('bridge.connect', `UXP bridge listening on ws://${this.options.host}:${this.options.port}${PLUGIN_ROUTE}`);
+      this.logger.info(
+        'bridge.connect',
+        `UXP bridge listening on ws://${this.options.host}:${this.options.port}${PLUGIN_ROUTE} (dual-stack)`,
+      );
     });
     this.wss.on('error', (err) => {
       this.lastError = err.message;
@@ -260,7 +273,7 @@ export class PluginBridge {
     if (!this.isConnected()) {
       return Promise.reject(
         new StudioException('NOT_CONNECTED', `Cannot run "${op}": the Photoshop AI Studio plugin is not connected`, {
-          details: { expected: `ws://localhost:${this.options.port}${PLUGIN_ROUTE}` },
+          details: { expected: `ws://127.0.0.1:${this.options.port}${PLUGIN_ROUTE}` },
         }),
       );
     }

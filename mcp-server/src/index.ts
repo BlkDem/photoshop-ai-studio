@@ -82,7 +82,7 @@ async function main(): Promise<void> {
     if (!config.useMockAdapter) {
       logger.info({
         event: 'connection',
-        message: `UXP bridge listening on ws://localhost:${config.pluginPort}${PLUGIN_ROUTE}`,
+        message: `UXP bridge listening on port ${config.pluginPort}${PLUGIN_ROUTE} (dual-stack; the plugin dials the hostname localhost, never an IP literal — see ADR-01)`,
       });
     }
   });

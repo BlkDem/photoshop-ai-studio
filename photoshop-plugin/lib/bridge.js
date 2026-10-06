@@ -80,21 +80,45 @@ Logger.setRemoteSink(sendLog);
 // ---------------------------------------------------------------------------
 
 /**
+ * How long `config.json` gets before the plugin gives up on it.
+ *
+ * A `.catch` is not enough. The read goes through `fs.getEntryWithUrl`, and a UXP
+ * filesystem promise that never settles takes neither the resolve nor the reject
+ * path — which deadlocks `connect()` before it ever opens the socket. The
+ * symptom is a plugin that is loaded, whose panel works, and which never once
+ * attempts a connection: indistinguishable from a suspended plugin, and measured
+ * here rather than assumed.
+ */
+var CONFIG_TIMEOUT_MS = 2000;
+
+/**
  * Reads `config.json` from the plugin folder.
  *
- * Returns a promise that always resolves: a missing or malformed config must
- * leave the plugin running with defaults, not dead. Sequencing matters — `connect`
- * waits for this before opening the socket, because an operation that arrives
- * before the config has loaded would run with an empty workspace root and fail
- * every filesystem operation.
+ * Returns a promise that always resolves: a missing, malformed, or *slow* config
+ * must leave the plugin running with defaults, not dead. Sequencing matters —
+ * `connect` waits for this before opening the socket, because an operation that
+ * arrives before the config has loaded would run with an empty workspace root and
+ * fail every filesystem operation.
  */
 function loadConfig(overrides) {
   var config = {
+    // `localhost`, NOT an IP literal. UXP's manifest parser discards IP-literal
+    // hosts before matching a URL against `requiredPermissions.network.domains`,
+    // so `ws://127.0.0.1:3002/bridge` is refused with "Manifest entry not found"
+    // no matter how the domains are spelled — measured, after spending a cycle
+    // changing this to an IP to chase an unrelated IPv6 theory. ADR-001 in
+    // docs/architecture.md records the real behaviour; do not "fix" it again.
     bridgeUrl: 'ws://localhost:3002/bridge',
     workspaceRoot: '',
     outputDir: '',
     reconnectBaseMs: 500,
     reconnectMaxMs: 15000,
+    // Matches the shipped config.json, and has to be here as well: `getConfig()`
+    // returns these defaults until config.json has loaded, so without it every
+    // consumer that asks during module load sees `undefined` for a setting that is
+    // in fact on. That is how the in-folder log sink got switched off by the very
+    // check meant to switch it on.
+    devTools: true,
   };
   applyOverrides(config, overrides);
   state.config = config;
@@ -115,29 +139,106 @@ function loadConfig(overrides) {
    * configuration problem into a dead plugin.
    */
   function readPluginFile(name) {
-    return fs
-      .getEntryWithUrl('plugin:/' + name)
-      .then(function (entry) {
-        if (!entry || typeof entry.read !== 'function') {
-          throw new Error('getEntryWithUrl("plugin:/' + name + '") did not return a readable entry');
-        }
-        return entry.read({ format: storage.formats.utf8 });
-      })
-      .catch(function (firstError) {
-        return fs.getPluginFolder().then(function (folder) {
-          var entry = folder && typeof folder.getEntry === 'function' ? folder.getEntry(name) : null;
+    // Every entry point is feature-detected and every promise is entered inside
+    // a `try`, because a *synchronous* throw here would escape `loadConfig`
+    // entirely: it would skip both the timeout race and the `.catch`, propagate
+    // out of `connect()`, and take the rest of index.js with it. Since
+    // `entrypoints.setup()` has already run by then, the panel still registers and
+    // every UI function is a hoisted declaration — so the plugin looks completely
+    // healthy while never once opening a socket. That is precisely the failure
+    // this guarding exists to prevent, and it is why the plugin connected to
+    // nothing at all for so long with no error anywhere.
+    var strategies = [];
+
+    if (fs && typeof fs.getEntryWithUrl === 'function') {
+      strategies.push(function () {
+        return fs.getEntryWithUrl('plugin:/' + name).then(function (entry) {
           if (!entry || typeof entry.read !== 'function') {
-            throw new Error(
-              'could not read ' + name + ' from the plugin folder (' + (firstError && firstError.message) + ')',
-            );
+            throw new Error('getEntryWithUrl("plugin:/' + name + '") did not return a readable entry');
           }
           return entry.read({ format: storage.formats.utf8 });
         });
       });
+    }
+
+    if (fs && typeof fs.getPluginFolder === 'function') {
+      strategies.push(function () {
+        return fs.getPluginFolder().then(function (folder) {
+          var entry = folder && typeof folder.getEntry === 'function' ? folder.getEntry(name) : null;
+          if (!entry || typeof entry.read !== 'function') {
+            throw new Error('could not read ' + name + ' from the plugin folder');
+          }
+          return entry.read({ format: storage.formats.utf8 });
+        });
+      });
+    }
+
+    if (strategies.length === 0) {
+      return Promise.reject(
+        new Error('no usable filesystem API for reading ' + name + ' (getEntryWithUrl=' + typeof (fs && fs.getEntryWithUrl) + ', getPluginFolder=' + typeof (fs && fs.getPluginFolder) + ')'),
+      );
+    }
+
+    function attempt(index, lastError) {
+      if (index >= strategies.length) {
+        return Promise.reject(lastError || new Error('could not read ' + name));
+      }
+      var started;
+      try {
+        started = strategies[index]();
+      } catch (err) {
+        return attempt(index + 1, err);
+      }
+      return Promise.resolve(started).catch(function (err) {
+        return attempt(index + 1, err);
+      });
+    }
+
+    return attempt(0, null);
   }
 
-  return readPluginFile('config.json')
+  var read = readPluginFile('config.json');
+
+  // Racing a real timeout rather than trusting the promise to settle.
+  var guarded = new Promise(function (resolve) {
+    var settled = false;
+    var timer = setTimeout(function () {
+      if (settled) return;
+      settled = true;
+      resolve({ timedOut: true });
+    }, CONFIG_TIMEOUT_MS);
+    read.then(
+      function (text) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve({ text: text });
+      },
+      function (err) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve({ error: err });
+      },
+    );
+  });
+
+  return guarded
+    .then(function (outcome) {
+      if (outcome.timedOut) {
+        state.configError =
+          'config.json did not answer within ' + CONFIG_TIMEOUT_MS + 'ms; continuing with defaults';
+        Logger.warn(state.configError);
+        applyOverrides(config, overrides);
+        state.config = config;
+        emit('config', config);
+        return config;
+      }
+      if (outcome.error) throw outcome.error;
+      return outcome.text;
+    })
     .then(function (text) {
+      if (typeof text !== 'string') return null;
       text0 = text;
       var parsed = JSON.parse(text);
       for (var key in parsed) {
@@ -176,11 +277,49 @@ function applyOverrides(config, overrides) {
 
 function connect(overrides) {
   state.wantConnected = true;
+
+  // Idempotent. `connect()` is called from three places — module load, the panel's
+  // `show`, and the reconnect command — and each call spends time loading
+  // config.json before a socket exists.
+  //
+  // The guard has to cover *that* window, not just an open socket. Keying it on
+  // `state.socket` alone let the panel's connect slip through while the module-load
+  // one was still reading config, so two sockets opened ~200ms apart; the server
+  // replaces the older connection on every new arrival, so the first was closed,
+  // which scheduled a reconnect, which replaced the second — a loop that left the
+  // plugin flapping and the server reporting "disconnected" the whole time.
+  if (state.connecting) {
+    Logger.info('connect: a connect is already in flight, ignoring this one');
+    return;
+  }
+  var existing = state.socket;
+  if (existing && (existing.readyState === 0 || existing.readyState === 1)) {
+    Logger.info('connect: already ' + (existing.readyState === 1 ? 'open' : 'connecting') + ', not opening another');
+    return;
+  }
+  state.connecting = true;
+
   // Sequenced deliberately: opening the socket first would let the first
   // operation run before the workspace root is known.
-  loadConfig(overrides).then(function (config) {
-    open();
-  });
+  // Belt and braces: `connect()` is called at module load, from the panel and
+  // from a menu command. If any of those can throw, one bad call takes down
+  // index.js with it, so nothing here is allowed to propagate.
+  try {
+    Promise.resolve(loadConfig(overrides))
+      .then(function () {
+        state.connecting = false;
+        open();
+      })
+      .catch(function (err) {
+        state.connecting = false;
+        Logger.error('connect failed: ' + ((err && err.message) || String(err)));
+        scheduleReconnect();
+      });
+  } catch (err) {
+    state.connecting = false;
+    Logger.error('connect threw: ' + ((err && err.message) || String(err)));
+    scheduleReconnect();
+  }
 }
 
 function open() {
@@ -208,6 +347,7 @@ function open() {
 
   socket.onopen = function () {
     state.attempt = 0;
+    state.connecting = false;
     Logger.info('socket open, sending hello');
     var sent = send({
       v: PROTOCOL_VERSION,
@@ -265,6 +405,7 @@ function open() {
 
   socket.onclose = function (event) {
     state.socket = null;
+    state.connecting = false;
     Logger.warn('socket closed (' + (event && event.code) + ')', {
       reason: event && event.reason ? event.reason : undefined,
       url: config.bridgeUrl,
