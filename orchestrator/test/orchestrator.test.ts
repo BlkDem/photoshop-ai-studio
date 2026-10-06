@@ -511,6 +511,9 @@ const NOT_DERIVABLE: Record<string, string> = {
   set_layer_locking: 'setLocking is accepted but no flag is readable back: layer.locked stays false either way',
   stroke_path: 'the ink is pixels and no snapshot field reports a pixel footprint; the adapter samples the canvas along the path instead, so the proof happens at execution',
   paint_stroke: 'the ink is pixels and no snapshot field reports a pixel footprint; the adapter samples the canvas along the path instead, so the proof happens at execution',
+  paint_strokes:
+    'a batch of ink, same as paint_stroke: no snapshot field reports a pixel footprint, so the adapter samples the canvas along each path and the proof happens at execution. ' +
+    'The per-stroke failures the result carries are not derivable either — they come from the adapter, and a batch that partly failed is otherwise indistinguishable from one that succeeded.',
 };
 
 /** Read-only tools: there is no post-condition because nothing changed. */

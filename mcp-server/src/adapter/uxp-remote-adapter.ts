@@ -344,6 +344,17 @@ export class UxpRemoteAdapter implements PhotoshopAdapter {
     return (await this.send('paint_stroke', params)) as ResultOf<'paint_stroke'>;
   }
 
+  /**
+   * A whole layer's worth of strokes in one frame.
+   *
+   * The batching is on this side deliberately: the engine hands over a complete
+   * layer, and how that travels — one frame, or many — is a transport decision
+   * the painting logic must not know about.
+   */
+  async paintStrokes(params: ParamsOf<'paint_strokes'>): Promise<ResultOf<'paint_strokes'>> {
+    return (await this.send('paint_strokes', params)) as ResultOf<'paint_strokes'>;
+  }
+
   async paintGradient(params: ParamsOf<'paint_gradient'>): Promise<ResultOf<'paint_gradient'>> {
     return (await this.send('paint_gradient', params)) as ResultOf<'paint_gradient'>;
   }

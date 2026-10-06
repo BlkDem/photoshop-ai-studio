@@ -97,6 +97,7 @@ export const OPERATION_NAMES = [
   'list_brushes',
   'stroke_path',
   'paint_stroke',
+  'paint_strokes',
   'paint_gradient',
   // studio support
   'render_preview',
@@ -418,6 +419,52 @@ export const StrokePathParamsSchema = BrushStrokeParamsBase.extend({
   simulatePressure: z.boolean().default(false),
 });
 
+/**
+ * One stroke inside a batch.
+ *
+ * Every field mirrors the equivalent on `paint_stroke` and inherits the same
+ * default, so a batched stroke and a single stroke are the same mark. Repeating
+ * them rather than sharing one base is deliberate: `points` is required here and
+ * optional-but-different on `stroke_path`, and a union would make the generated
+ * tool schema unreadable.
+ */
+export const StrokeSpecSchema = z.object({
+  /** Points the stroke passes through, in order. */
+  points: z.array(PointSchema).min(2),
+  /** Stroke width in pixels. */
+  brushSize: z.number().int().positive().max(5000).optional(),
+  /** Stroke colour. */
+  color: RgbInputSchema.optional(),
+  /** Opacity of the stroke, 0-100. */
+  opacity: z.number().min(0).max(100).optional(),
+  /** Blend mode the stroke is composited with. */
+  blendMode: BlendModeSchema.optional(),
+  /** Disc density as a fraction of the radius; lower is denser and slower. */
+  spacing: z.number().gt(0).max(1).optional(),
+  /** A synthesized soft edge. Omit for a flat disc. */
+  tip: TipModelSchema.optional(),
+  /** Corner-cutting passes over the points, 0-100. */
+  smoothing: z.number().int().min(0).max(100).optional(),
+  /** Taper the ends, as if the pen pressed down and lifted off. */
+  simulatePressure: z.boolean().optional(),
+});
+
+/** Parameters for `paint_strokes` — a whole layer's worth of marks in one call. */
+export const PaintStrokesParamsSchema = z.object({
+  documentId: IdSchema.default('active'),
+  /** Paint onto a new layer instead of the active layer. */
+  newLayer: z.boolean().default(false),
+  /** Name for the layer when `newLayer` is set. */
+  layerName: z.string().min(1).optional(),
+  /**
+   * Capped so one call cannot hold the modal scope indefinitely. The cap is on
+   * *strokes*, not fills: a single stroke may legitimately be hundreds of fills,
+   * and that is what the batch is for. 2000 covers a dense layer of marks while
+   * keeping one request bounded.
+   */
+  strokes: z.array(StrokeSpecSchema).min(1).max(2000),
+});
+
 /** Brush stroke parameters for paint_stroke (freehand-style). */
 export const PaintStrokeParamsSchema = BrushStrokeParamsBase.extend({
   /** Points the stroke passes through, in order. */
@@ -550,6 +597,41 @@ export const BrushStrokeResultSchema = z.object({
   tipIsSynthesized: z.boolean().nullable().optional(),
 });
 export type BrushStrokeResult = z.infer<typeof BrushStrokeResultSchema>;
+
+/**
+ * Result of `paint_strokes`.
+ *
+ * `failures` is the part that matters. A batch is the unit a painting is built
+ * from, so aborting on the first bad mark would mean re-running everything that
+ * already landed; but swallowing the failure would mean a painting that quietly
+ * has holes in it. Every stroke that did not paint is listed by index with the
+ * reason, and `success` is false when any did — so the caller can retry the
+ * listed indices alone, or refuse, without re-deriving what happened.
+ */
+export const PaintStrokesResultSchema = z.object({
+  success: z.boolean(),
+  layerId: z.number().int().optional(),
+  layerName: z.string().optional(),
+  /** How many strokes of the batch painted. */
+  strokesPainted: z.number().int(),
+  /** Total discs filled across the batch. */
+  stampsPainted: z.number().int(),
+  samplesChecked: z.number().int().optional(),
+  samplesChanged: z.number().int().optional(),
+  verified: z.boolean().nullable().optional(),
+  truncated: z.boolean().optional(),
+  failures: z
+    .array(
+      z.object({
+        index: z.number().int(),
+        code: z.string(),
+        message: z.string(),
+        recoverable: z.boolean().optional(),
+      }),
+    )
+    .optional(),
+});
+export type PaintStrokesResult = z.infer<typeof PaintStrokesResultSchema>;
 
 /**
  * Result of paint_gradient.
@@ -1268,6 +1350,23 @@ export const OPERATIONS = {
     result: BrushStrokeResultSchema,
   },
 
+  paint_strokes: {
+    tool: 'photoshop.paint_strokes',
+    title: 'Paint Strokes',
+    description:
+      'Paint a whole layer\'s worth of strokes in one call. Each entry in `strokes` takes the same fields as ' +
+      '`paint_stroke` and paints the same mark; they share one Photoshop modal scope and one layer, so this is ' +
+      'the form to use when building a picture rather than placing single marks. Use it instead of calling ' +
+      '`paint_stroke` in a loop: a stroke is hundreds of fills, and a loop makes every one of them a separate ' +
+      'round trip plus a modal scope. `spacing` and `tip` behave exactly as on `paint_stroke`. ' +
+      'Every stroke that did not paint is listed in `failures` by index with its reason, and `success` is false ' +
+      'if any did — so a partial painting is visible rather than quietly incomplete.',
+    category: 'image',
+    destructive: false,
+    requiresConfirmation: false,
+    params: PaintStrokesParamsSchema,
+    result: PaintStrokesResultSchema,
+  },
   paint_gradient: {
     tool: 'photoshop.paint_gradient',
     title: 'Paint Gradient',

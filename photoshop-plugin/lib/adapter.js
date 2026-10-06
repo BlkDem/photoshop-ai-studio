@@ -84,6 +84,7 @@ var OPERATIONS = {
   list_brushes: brushOps.list_brushes,
   stroke_path: brushOps.stroke_path,
   paint_stroke: brushOps.paint_stroke,
+  paint_strokes: brushOps.paint_strokes,
   paint_gradient: gradientOps.paint_gradient,
 
   // canvas
@@ -249,6 +250,7 @@ function commandNameFor(op) {
     list_brushes: 'List brushes',
     stroke_path: 'Stroke path',
     paint_stroke: 'Paint stroke',
+    paint_strokes: 'Paint strokes',
     paint_gradient: 'Paint gradient',
   };
   return 'AI Studio: ' + (names[op] || op);

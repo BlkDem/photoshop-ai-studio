@@ -21,7 +21,7 @@ as real pixels on a real paint layer, with a genuinely soft edge.
 | Normalized coordinates (resolution independent) | built, tested |
 | Synthesized tips in plugin + mock | built, differential-tested |
 | Stroke verification (pixels actually moved) | working — caught 3 real bugs |
-| Batched `paint_strokes` MCP op | **not built** |
+| Batched `paint_strokes` MCP op | built, tested, measured |
 | ArtDirector (request → PaintingPlan) | **not built** |
 | Orchestrator wiring / checkpoint guard | **not built** |
 | Studio PAINT mode | **not built** |
@@ -180,8 +180,24 @@ Stated plainly because each one will otherwise be rediscovered the hard way.
 3. **No undo bracket.** `suspendHistory` cannot span a multi-request run
    (ADR-014). A stopped painting is a partially painted document, not a rolled-back
    one — which is why a run must happen on a checkpointed duplicate.
-4. **One network call per stroke.** The engine batches, but the MCP surface still
-   takes one stroke per call. This is the single biggest remaining cost.
+4. **Wall-clock is fills, not transport.** This was measured and it contradicts
+   what batching was assumed to be for. `scripts/measure-batching.mjs` runs the
+   same marks both ways through one MCP client, so the only variable is the number
+   of calls:
+
+   | Workload | separate | batched |
+   | --- | --- | --- |
+   | 4 strokes, ~1139 fills | 45.7–67.5 s | 50.0–55.3 s |
+   | 40 single-stamp dabs | 14.6–15.0 s | 14.2–14.8 s |
+
+   The variance between runs is larger than the effect, so there is **no
+   measurable saving** on this host. Every stamp is a `selectEllipse` plus a
+   `batchPlay` inside Photoshop, and that is where the time is. An earlier version
+   of this document called transport "the single biggest remaining cost"; it is
+   not, and the measurement is kept here so nobody re-argues it.
+
+   What actually reduces painting time is fewer fills per stroke — coarser
+   spacing, fewer rings — and that trades against quality.
 
 ---
 
@@ -189,17 +205,21 @@ Stated plainly because each one will otherwise be rediscovered the hard way.
 
 In priority order.
 
-### 5.1 Batched `paint_strokes` MCP op
+### 5.1 Batched `paint_strokes` MCP op — **done**
 
-The engine already hands over a whole layer's strokes in one `paint()` call, but
-`AdapterPaintTarget` loops one `paint_stroke` per stroke because that is all the
-adapter surface allows. A dense tip stroke is ~688 fills, so a painting is
-thousands of round trips.
+One call, one modal scope, one layer, many strokes; the loop lives in the adapter
+so the engine stays ignorant of transport. The per-stroke failures the result
+carries are the part that earns it: a painting forty marks in is not discarded
+because mark forty-one had no usable points, and `failures` names which ones so
+they can be retried alone.
 
-Add `photoshop.paint_strokes`: one call, one modal scope, many strokes. The loop
-belongs in the *adapter*, not the engine — the engine must not know how a batch
-travels. This unblocks §13 and is the prerequisite for everything below being
-usable.
+Measured benefit: none that survives the noise (§4.4). It is still the right
+*shape* — the engine already produces a layer at a time, and one call per layer is
+what it should cost — but it is not a speed feature, and it should not be sold as
+one.
+
+Verified on this host: 4 strokes, 1139 fills, one call, one layer, 12/12 samples
+moved.
 
 ### 5.2 ArtDirector
 

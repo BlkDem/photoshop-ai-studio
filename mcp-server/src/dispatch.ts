@@ -93,6 +93,7 @@ export const DISPATCH: OpDispatcher = {
   list_brushes: (a, p) => a.listBrushes(p),
   stroke_path: (a, p) => a.strokePath(p),
   paint_stroke: (a, p) => a.paintStroke(p),
+  paint_strokes: (a, p) => a.paintStrokes(p),
   paint_gradient: (a, p) => a.paintGradient(p),
 
   // --- images --------------------------------------------------------------

@@ -42,6 +42,19 @@ interface BrushResult {
   truncated?: boolean;
 }
 
+interface BatchResult {
+  success: boolean;
+  layerId?: number;
+  layerName?: string;
+  strokesPainted: number;
+  stampsPainted: number;
+  samplesChecked?: number;
+  samplesChanged?: number;
+  verified?: boolean | null;
+  truncated?: boolean;
+  failures?: Array<{ index: number; code: string; message: string; recoverable?: boolean }>;
+}
+
 interface BrushModule {
   list_brushes(ctx: unknown): Promise<{
     available: boolean;
@@ -573,5 +586,131 @@ describe('stroke opacity', () => {
     // Fewer discs means less to divide by, so the per-disc alpha is *higher*.
     expect(alpha(25, 60, 2)).toBeLessThan(alpha(25, 60, 1));
     expect(alpha(25, 60, 40)).toBeLessThan(alpha(25, 60, 2));
+  });
+});
+
+/**
+ * `paint_strokes` — a whole layer in one operation.
+ *
+ * The thing being tested is not that the marks appear; it is that they appear
+ * *together*: one layer, one modal scope, one round trip. A batch that quietly
+ * created a layer per stroke would still paint a correct-looking picture while
+ * throwing away the only reason the operation exists.
+ */
+describe('paint_strokes', () => {
+  const spec = (over: Record<string, unknown> = {}) => ({
+    points: [
+      { x: 40, y: 60 },
+      { x: 200, y: 120 },
+    ],
+    brushSize: 12,
+    color: { r: 0, g: 0, b: 0 },
+    opacity: 100,
+    ...over,
+  });
+
+  /**
+   * Distinct marks for each index.
+   *
+   * Not a convenience. Two identical strokes in the same colour are the *same*
+   * mark: the second finds every sampled pixel already at that colour, so the
+   * verification correctly reports that nothing changed and the batch records it as
+   * a failure. That is the behaviour under test elsewhere, so a batch fixture has to
+   * avoid it rather than work around it.
+   */
+  const distinct = (count: number): Record<string, unknown>[] =>
+    Array.from({ length: count }, (_, i) =>
+      spec({
+        points: [
+          { x: 30 + i * 5, y: 40 + i * 60 },
+          { x: 260 + i * 5, y: 90 + i * 60 },
+        ],
+        color: { r: 10 + i * 60, g: 20 + i * 30, b: 30 + i * 20 },
+      }),
+    );
+
+  const run = (brush: BrushModule, params: Record<string, unknown>) =>
+    (
+      brush as unknown as {
+        paint_strokes(ctx: unknown): Promise<BatchResult>;
+      }
+    ).paint_strokes({ params: { documentId: 'active', ...params } });
+
+  it('paints every stroke in the batch', async () => {
+    const host = drawingHost();
+    const result = await run(loadBrush(host.photoshop), {
+      strokes: distinct(2),
+    });
+    expect(result.success).toBe(true);
+    expect(result.strokesPainted).toBe(2);
+    expect(result.stampsPainted).toBeGreaterThan(0);
+    expect(result.failures).toEqual([]);
+  });
+
+  it('creates exactly one layer for the whole batch', async () => {
+    const host = drawingHost();
+    const doc = host.document as Record<string, unknown>;
+    let created = 0;
+    doc.createLayer = (options?: { name?: string }) => {
+      created += 1;
+      return { id: 100 + created, name: options?.name ?? 'Stroke' };
+    };
+    const result = await run(loadBrush(host.photoshop), {
+      newLayer: true,
+      layerName: 'Waves',
+      strokes: distinct(3),
+    });
+    expect(created).toBe(1);
+    expect(result.layerName).toBe('Waves');
+    expect(result.strokesPainted).toBe(3);
+  });
+
+  it('reports each stroke that failed by index and keeps the rest', async () => {
+    // A painting forty marks in must not be discarded because mark forty-one had
+    // no usable points; the caller needs to know which one to retry.
+    const host = drawingHost();
+    const result = await run(loadBrush(host.photoshop), {
+      strokes: [
+        spec({ points: [{ x: 30, y: 40 }, { x: 260, y: 90 }] }),
+        // Empty, not a single point: `eachStamp` treats one point as a dot and
+        // paints it, which is correct behaviour for a click. An empty list is what
+        // the plugin actually refuses.
+        spec({ points: [] }),
+        spec({ points: [{ x: 30, y: 160 }, { x: 260, y: 210 }], color: { r: 90, g: 40, b: 50 } }),
+      ],
+    });
+    expect(result.success).toBe(false);
+    expect(result.strokesPainted).toBe(2);
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures?.[0]?.index).toBe(1);
+    expect(result.failures?.[0]?.code).toBe('INVALID_PARAMS');
+  });
+
+  it('rejects an empty batch rather than reporting a no-op success', async () => {
+    const host = drawingHost();
+    await expect(run(loadBrush(host.photoshop), { strokes: [] })).rejects.toMatchObject({
+      code: 'INVALID_PARAMS',
+    });
+  });
+
+  it('reports a synthesized tip per stroke, never as a Photoshop brush', async () => {
+    const host = drawingHost();
+    const result = await run(loadBrush(host.photoshop), {
+      strokes: [
+        spec({ tip: { core: 0.3, steps: 3, outerAlpha: 0.2 }, points: [{ x: 30, y: 40 }, { x: 260, y: 90 }] }),
+        spec({ points: [{ x: 30, y: 160 }, { x: 260, y: 210 }], color: { r: 90, g: 40, b: 50 } }),
+      ],
+    });
+    expect(result.success).toBe(true);
+    // A flat stroke and a tipped one in the same batch must not be conflated.
+    expect(result.stampsPainted).toBeGreaterThan(0);
+  });
+
+  it('verifies against the canvas across the whole batch', async () => {
+    const host = drawingHost();
+    const result = await run(loadBrush(host.photoshop), { strokes: distinct(2) });
+    expect(result.samplesChecked).toBeGreaterThan(0);
+    expect(result.samplesChanged).toBeGreaterThan(0);
+    expect(result.verified).toBe(true);
   });
 });

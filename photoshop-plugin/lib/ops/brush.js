@@ -407,30 +407,30 @@ function strokeAlpha(opacity, radius, stampCount) {
 }
 
 /**
- * Shared body of `stroke_path` and `paint_stroke`.
+ * Paints one stroke onto an already-resolved document, selection and layer.
  *
- * The two operations differ only in how they receive their geometry — a segment
- * list with Bézier control points, or a flat point list — so they share one
- * implementation. That they were near-verbatim duplicates before is how
- * `smoothing` came to be honoured in one and dropped in the other.
+ * Shared by `stroke_path`, `paint_stroke` and `paint_strokes`, which differ only
+ * in how they receive their geometry and in whether they are handed one stroke or
+ * a batch. That they were near-verbatim duplicates before is how `smoothing` came
+ * to be honoured in one and dropped in the other.
  *
- * Note the absence of `ps.asModal` here: `adapter.js` already wraps every
- * mutating operation in a modal scope, and `executeAsModal` has no re-entrancy
- * guard, so a second scope was nesting inside the first.
+ * The caller owns the document, the selection and the layer, so a batch can paint
+ * many marks without re-resolving any of them — and, because `adapter.js` opens
+ * one modal scope per operation, without opening a scope per mark either.
  */
-function drawStroke(ctx, geometryInput) {
-  var params = ctx.params;
-  var color = ps.normalizeColor(params.color);
-  var opacity = typeof params.opacity === 'number' ? params.opacity : 100;
-  var brushSize = Math.max(1, params.brushSize || DEFAULT_BRUSH_SIZE);
-  var blendMode = params.blendMode || 'normal';
+function paintOneStroke(ctx, doc, selection, spec, target, geometryInput) {
+  var color = ps.normalizeColor(spec.color || { r: 0, g: 0, b: 0 });
+  var opacity = typeof spec.opacity === 'number' ? spec.opacity : 100;
+  var brushSize = Math.max(1, spec.brushSize || DEFAULT_BRUSH_SIZE);
+  var blendMode = spec.blendMode || 'normal';
+  var tip = spec.tip && typeof spec.tip === 'object' ? spec.tip : null;
 
   var stroke = geometry.buildStroke(geometryInput.segments, geometryInput.points, {
     brushSize: brushSize,
-    smoothing: params.smoothing,
-    simulatePressure: params.simulatePressure === true,
+    smoothing: spec.smoothing,
+    simulatePressure: spec.simulatePressure === true,
     maxStamps: MAX_STAMPS,
-    spacing: params.spacing,
+    spacing: spec.spacing,
   });
 
   if (stroke.stamps.length === 0) {
@@ -442,91 +442,207 @@ function drawStroke(ctx, geometryInput) {
     );
   }
 
-  // Resolved before the modal scope, and deliberately: `var` is function-scoped, so
-  // declaring it further down hoisted it past the log line and every run reported
-  // `tipSteps: 1` no matter what it painted. A log that is always wrong is worse
-  // than no log — it says the feature is off while it is on.
-  var tip = params.tip && typeof params.tip === 'object' ? params.tip : null;
+  Logger.info('rasterizing stroke', {
+    op: ctx.op,
+    stamps: stroke.stamps.length,
+    points: stroke.points.length,
+    brushSize: brushSize,
+    blendMode: blendMode,
+    simulatePressure: spec.simulatePressure === true,
+    tipSteps: tip ? tip.steps : 1,
+    spacing: spec.spacing === undefined ? 'default' : spec.spacing,
+  });
 
-  return ps.withForegroundColor(color, function () {
-    var doc = ps.resolveDocument(params.documentId);
-    var selection = doc.selection;
-    if (!selection || typeof selection.selectEllipse !== 'function') {
-      return Promise.reject(
-        StudioError('UNSUPPORTED_OPERATION', 'This Photoshop build exposes no selection.selectEllipse.', {
-          recoverable: false,
-        }),
-      );
-    }
+  // `opacity` is the opacity of the stroke; the discs that make it up get the alpha
+  // that adds up to it. A flat stroke keeps the measured `strokeAlpha`
+  // compensation; a tipped stroke recomputes per ring, because the ring stack is
+  // part of the overlap and pretending otherwise lands it opaque.
+  var flatOpacity = strokeAlpha(opacity, stroke.radius, stroke.stamps.length);
 
-    // `createStrokeLayer` is asynchronous because selecting the new layer is, and
-    // it must be awaited before anything paints: a stroke issued before the
-    // selection lands goes to the previously active layer.
-    var targetPromise =
-      params.newLayer === true
-        ? createStrokeLayer(doc, params.layerName).then(function (target) {
-            if (target && target.error) throw target.error;
-            return target;
-          })
-        : Promise.resolve(null);
+  return ps
+    .withForegroundColor(color, function () {
+      return rasterizeAndVerify(doc, selection, stroke, flatOpacity, blendMode, tip, spec.spacing);
+    })
+    .then(function (proof) {
+      // Normalised, not `target || docInfo(doc)`: `createStrokeLayer` speaks
+      // `{id, name}` while `docInfo` speaks `{layerId, layerName}`, and picking one
+      // or the other shape here reported `layerId: undefined` for every stroke onto
+      // a new layer — a layer that exists, painted correctly, and was named in the
+      // result as nothing.
+      var info = target ? { layerId: target.id, layerName: target.name } : docInfo(doc);
 
-    return targetPromise.then(function (target) {
-      Logger.info('rasterizing stroke', {
-        op: ctx.op,
-        stamps: stroke.stamps.length,
-        points: stroke.points.length,
+      if (proof.readable > 0 && proof.changed === 0) {
+        throw StudioError(
+          'STEP_FAILED',
+          'The stroke was filled but no sampled pixel along the path changed. ' +
+            'The path is probably already the colour being painted, or the target layer is hidden.',
+          { recoverable: false, details: { samples: proof.samples, painted: proof.painted } },
+        );
+      }
+
+      return {
+        layerId: info.layerId,
+        layerName: info.layerName,
         brushSize: brushSize,
         blendMode: blendMode,
-        simulatePressure: params.simulatePressure === true,
-        newLayer: params.newLayer === true,
-        tipSteps: tip ? tip.steps : 1,
-        spacing: params.spacing === undefined ? 'default' : params.spacing,
+        methodUsed: tip ? 'rasterized-stroke-synthesized-tip' : 'rasterized-stroke',
+        stampsPainted: proof.painted,
+        samplesChecked: proof.readable,
+        samplesChanged: proof.changed,
+        verified: proof.readable === 0 ? null : proof.changed > 0,
+        truncated: stroke.truncated,
+        // The tip is echoed back so a caller can never mistake a synthesized soft
+        // edge for a Photoshop brush preset. `tipIsSynthesized` is unconditionally
+        // true: there is no other kind of tip this host can do.
+        tip: tip ? { core: tip.core, steps: tip.steps, outerAlpha: tip.outerAlpha } : null,
+        tipIsSynthesized: tip ? true : null,
+      };
+    })
+    .catch(function (err) {
+      if (StudioError.isStudioError(err)) throw err;
+      throw StudioError('STEP_FAILED', 'Failed to draw stroke: ' + ((err && err.message) || String(err)), {
+        recoverable: true,
+        details: { brushSize: brushSize, stamps: stroke.stamps.length },
       });
+    });
+}
 
-      // `opacity` is the opacity of the stroke; the discs that make it up get the
-      // alpha that adds up to it. A flat stroke keeps the measured `strokeAlpha`
-      // compensation; a tipped stroke recomputes per ring, because the ring stack is
-      // part of the overlap and pretending otherwise lands it opaque.
-      var flatOpacity = strokeAlpha(opacity, stroke.radius, stroke.stamps.length);
-      return rasterizeAndVerify(doc, selection, stroke, flatOpacity, blendMode, tip, params.spacing)
-        .then(function (proof) {
-          var info = target ? { layerId: target.id, layerName: target.name } : docInfo(doc);
+/**
+ * Resolves the document and selection, and creates the stroke layer when asked.
+ *
+ * Split from `paintOneStroke` so `paint_strokes` can pay for it once for the whole
+ * batch rather than once per mark.
+ *
+ * Note the absence of `ps.asModal` here and in `paintOneStroke`: `adapter.js`
+ * wraps every mutating operation in a modal scope, and `executeAsModal` has no
+ * re-entry guard, so a second scope would nest inside the first.
+ */
+function resolveStrokeTarget(ctx) {
+  var doc = ps.resolveDocument(ctx.params.documentId);
+  var selection = doc.selection;
+  if (!selection || typeof selection.selectEllipse !== 'function') {
+    throw StudioError('UNSUPPORTED_OPERATION', 'This Photoshop build exposes no selection.selectEllipse.', {
+      recoverable: false,
+    });
+  }
+  if (ctx.params.newLayer !== true) {
+    return Promise.resolve({ doc: doc, selection: selection, target: null });
+  }
+  return createStrokeLayer(doc, ctx.params.layerName).then(function (target) {
+    if (target && target.error) throw target.error;
+    return { doc: doc, selection: selection, target: target };
+  });
+}
 
-          if (proof.readable > 0 && proof.changed === 0) {
-            throw StudioError(
-              'STEP_FAILED',
-              'The stroke was filled but no sampled pixel along the path changed. ' +
-                'The path is probably already the colour being painted, or the target layer is hidden.',
-              { recoverable: false, details: { samples: proof.samples, painted: proof.painted } },
-            );
-          }
+/** Single-stroke shared body. */
+function drawStroke(ctx, geometryInput) {
+  return resolveStrokeTarget(ctx).then(function (resolved) {
+    return paintOneStroke(ctx, resolved.doc, resolved.selection, ctx.params, resolved.target, geometryInput).then(
+      function (result) {
+        return {
+          success: true,
+          layerId: result.layerId,
+          layerName: result.layerName,
+          brushSize: result.brushSize,
+          blendMode: result.blendMode,
+          methodUsed: result.methodUsed,
+          stampsPainted: result.stampsPainted,
+          samplesChecked: result.samplesChecked,
+          samplesChanged: result.samplesChanged,
+          verified: result.verified,
+          truncated: result.truncated,
+          tip: result.tip,
+          tipIsSynthesized: result.tipIsSynthesized,
+        };
+      },
+    );
+  });
+}
 
-          return {
-            success: true,
-            layerId: info.layerId,
-            layerName: info.layerName,
-            brushSize: brushSize,
-            blendMode: blendMode,
-            methodUsed: tip ? 'rasterized-stroke-synthesized-tip' : 'rasterized-stroke',
-            stampsPainted: proof.painted,
-            samplesChecked: proof.readable,
-            samplesChanged: proof.changed,
-            verified: proof.readable === 0 ? null : proof.changed > 0,
-            truncated: stroke.truncated,
-            // The tip is echoed back so a caller can never mistake a synthesized
-            // soft edge for a Photoshop brush preset. `tipIsSynthesized` is
-            // unconditionally true: there is no other kind of tip this host can do.
-            tip: tip ? { core: tip.core, steps: tip.steps, outerAlpha: tip.outerAlpha } : null,
-            tipIsSynthesized: tip ? true : null,
-          };
-        })
-        .catch(function (err) {
-          if (StudioError.isStudioError(err)) throw err;
-          throw StudioError('STEP_FAILED', 'Failed to draw stroke: ' + ((err && err.message) || String(err)), {
-            recoverable: true,
-            details: { brushSize: brushSize, stamps: stroke.stamps.length },
+/**
+ * `paint_strokes` — a whole layer's worth of marks in one operation.
+ *
+ * The reason this exists: a stroke is hundreds of fills, and calling `paint_stroke`
+ * in a loop makes every one of them a round trip, a result parse and a modal
+ * scope. A painting is a thousand marks or more, so the loop version spends all its
+ * time in transport. Here the batch is one frame, one modal scope and one layer.
+ *
+ * Failures are collected by index rather than thrown. A painting forty marks in
+ * should not be discarded because mark forty-one had no usable points, and the
+ * caller needs to know which one — so `success` is false when any stroke failed and
+ * `failures` names them, and the strokes that did paint are still reported.
+ */
+function paintStrokes(ctx) {
+  ctx.op = 'paint_strokes';
+  var specs = ctx.params.strokes || [];
+  if (specs.length === 0) {
+    return Promise.reject(StudioError('INVALID_PARAMS', 'paint_strokes needs at least one stroke.'));
+  }
+
+  return resolveStrokeTarget(ctx).then(function (resolved) {
+    var doc = resolved.doc;
+    var selection = resolved.selection;
+    var failures = [];
+    var painted = [];
+    var index = 0;
+
+    function next() {
+      if (index >= specs.length) return Promise.resolve();
+      var spec = specs[index];
+      var at = index;
+      index += 1;
+      return paintOneStroke(
+        ctx,
+        doc,
+        selection,
+        spec,
+        resolved.target,
+        {
+          points: spec.points || [],
+          emptyMessage: 'paint_strokes: stroke ' + at + ' needs at least two points.',
+          pointCount: (spec.points || []).length,
+        },
+      ).then(
+        function (result) {
+          painted.push(result);
+        },
+        function (err) {
+          var code = err && err.code ? err.code : 'STEP_FAILED';
+          failures.push({
+            index: at,
+            code: code,
+            message: (err && err.message) || String(err),
+            recoverable: err && typeof err.recoverable === 'boolean' ? err.recoverable : undefined,
           });
-        });
+          Logger.warn('paint_strokes: stroke ' + at + ' failed', { code: code, message: (err && err.message) || String(err) });
+        },
+      ).then(next);
+    }
+
+    return next().then(function () {
+      var stampsPainted = 0;
+      var samplesChecked = 0;
+      var samplesChanged = 0;
+      var truncated = false;
+      for (var i = 0; i < painted.length; i++) {
+        stampsPainted += painted[i].stampsPainted || 0;
+        samplesChecked += painted[i].samplesChecked || 0;
+        samplesChanged += painted[i].samplesChanged || 0;
+        if (painted[i].truncated) truncated = true;
+      }
+
+      return {
+        success: failures.length === 0 && painted.length > 0,
+        layerId: resolved.target ? resolved.target.id : docInfo(doc).layerId,
+        layerName: resolved.target ? resolved.target.name : docInfo(doc).layerName,
+        strokesPainted: painted.length,
+        stampsPainted: stampsPainted,
+        samplesChecked: samplesChecked,
+        samplesChanged: samplesChanged,
+        verified: samplesChecked === 0 ? null : samplesChanged > 0,
+        truncated: truncated,
+        failures: failures,
+      };
     });
   });
 }
@@ -595,10 +711,12 @@ function paintStroke(ctx) {
   });
 }
 
+
 module.exports = {
   list_brushes: listBrushes,
   stroke_path: strokePath,
   paint_stroke: paintStroke,
+  paint_strokes: paintStrokes,
   // Shared with the gradient rasterizer. A gradient is the same two primitives
   // in a different order — select a shape, fill it — so it uses these rather
   // than keeping its own copies that could drift from the ones under test.

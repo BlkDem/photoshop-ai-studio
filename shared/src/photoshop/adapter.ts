@@ -5,7 +5,12 @@ import type { DocumentListResult } from './operations.js';
 import type { LayerInfo, LayerSelector, LayerPosition } from './layer.js';
 import type { CapabilitiesResult, ExportResult, ExportFormat, ParamsOf, PreviewResult, SampleColorResult } from './operations.js';
 import type { FontInfo, RgbColor, TextAlign, TextLayerInfo } from './text.js';
-import type { ListBrushesResult, BrushStrokeResult, PaintGradientResult } from './operations.js';
+import type {
+  ListBrushesResult,
+  BrushStrokeResult,
+  PaintStrokesResult,
+  PaintGradientResult,
+} from './operations.js';
 /**
  * The Photoshop abstraction layer (brief §12).
  *
@@ -123,6 +128,7 @@ export interface PhotoshopAdapter {
   listBrushes(params: ParamsOf<'list_brushes'>): Promise<ListBrushesResult>;
   strokePath(params: ParamsOf<'stroke_path'>): Promise<BrushStrokeResult>;
   paintStroke(params: ParamsOf<'paint_stroke'>): Promise<BrushStrokeResult>;
+  paintStrokes(params: ParamsOf<'paint_strokes'>): Promise<PaintStrokesResult>;
   paintGradient(params: ParamsOf<'paint_gradient'>): Promise<PaintGradientResult>;
 
   // --- images --------------------------------------------------------------

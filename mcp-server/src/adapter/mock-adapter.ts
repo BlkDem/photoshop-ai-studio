@@ -31,6 +31,7 @@ import {
   type TextLayerInfo,
   type ListBrushesResult,
   type BrushStrokeResult,
+  type PaintStrokesResult,
   type PaintGradientResult,
 } from '@photoshop-ai-studio/shared';
 import { Workspace } from '../workspace.js';
@@ -855,6 +856,76 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
   }
 
   /**
+   * Paints a batch, one layer, one pass.
+   *
+   * Every stroke inherits the batch's `newLayer`/`layerName`, which is what makes
+   * the operation useful: a painting is built a layer at a time, so the layer has
+   * to be chosen once for the whole batch rather than per stroke.
+   *
+   * Failures are collected by index instead of thrown, mirroring the plugin: a
+   * painting that is 40 marks in should not be discarded because mark 41 had no
+   * usable points, and the caller needs to know exactly which one.
+   */
+  async paintStrokes(params: ParamsOf<'paint_strokes'>): Promise<PaintStrokesResult> {
+    // Called for its throw: there is no active document to paint into, and failing
+    // here beats reporting a batch that painted nothing.
+    this.active();
+    const failures: Array<{ index: number; code: string; message: string; recoverable?: boolean }> = [];
+    let layerId: number | undefined;
+    let layerName: string | undefined;
+
+    const results = params.strokes.map((spec, index) => {
+      try {
+        // Forced onto the resolved layer: the batch decides it, so a per-stroke
+        // `newLayer` would create one layer per mark and defeat the point.
+        const result = this.drawStroke(
+          {
+            ...spec,
+            documentId: params.documentId,
+            newLayer: index === 0 ? params.newLayer : false,
+            layerName: params.layerName,
+            opacity: spec.opacity ?? 100,
+          } as ParamsOf<'paint_stroke'>,
+          {
+            points: spec.points.map((p) => ({ x: p.x, y: p.y })),
+            starts: spec.points.length > 0 ? [0] : [],
+          },
+        );
+        layerId = result.layerId ?? layerId;
+        layerName = result.layerName ?? layerName;
+        return { ok: true as const, result };
+      } catch (error) {
+        const studioError = error instanceof StudioException ? error : null;
+        failures.push({
+          index,
+          code: studioError?.code ?? 'STEP_FAILED',
+          message: (error as Error)?.message ?? String(error),
+          ...(studioError?.recoverable === undefined ? {} : { recoverable: studioError.recoverable }),
+        });
+        return { ok: false as const };
+      }
+    });
+
+    const painted = results.filter((r) => r.ok);
+    const stampsPainted = painted.reduce((sum, r) => sum + ((r as { result: BrushStrokeResult }).result.stampsPainted ?? 0), 0);
+    const samplesChecked = painted.reduce((sum, r) => sum + ((r as { result: BrushStrokeResult }).result.samplesChecked ?? 0), 0);
+    const samplesChanged = painted.reduce((sum, r) => sum + ((r as { result: BrushStrokeResult }).result.samplesChanged ?? 0), 0);
+
+    return {
+      success: failures.length === 0 && painted.length > 0,
+      layerId,
+      layerName,
+      strokesPainted: painted.length,
+      stampsPainted,
+      samplesChecked,
+      samplesChanged,
+      verified: samplesChecked === 0 ? null : samplesChanged > 0,
+      truncated: painted.some((r) => (r as { result: BrushStrokeResult }).result.truncated === true),
+      failures,
+    };
+  }
+
+  /**
    * Resolves a ramp into bands and records them, mirroring the plugin's
    * `paint_gradient` band for band.
    *
@@ -1100,7 +1171,7 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
    * Layers that have at least one stroke on them, so the preview can leave their
    * artwork alone instead of drawing a grey placeholder over it.
    */
-  private previewPaintedLayerIds(doc: MockDocument): Set<number> {
+  private previewPaintedLayerIds(): Set<number> {
     return new Set(this.strokes.map((stroke) => stroke.layerId));
   }
 
@@ -1235,7 +1306,7 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
       doc.layers.filter((l) => l.visible).map((l) => ({ ...l, scale })),
       this.previewStrokes(doc, scale),
       this.previewGradients(doc, scale),
-      this.previewPaintedLayerIds(doc),
+      this.previewPaintedLayerIds(),
     );
     writeFileSync(path, png);
     return { path, format: 'png', bytes: png.byteLength, overwritten: params.overwrite };
@@ -1286,7 +1357,7 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
       doc.layers.filter((l) => l.visible).map((l) => ({ ...l, scale })),
       this.previewStrokes(doc, scale),
       this.previewGradients(doc, scale),
-      this.previewPaintedLayerIds(doc),
+      this.previewPaintedLayerIds(),
     );
     return { mimeType: 'image/png', base64: png.toString('base64'), width, height };
   }
