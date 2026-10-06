@@ -370,6 +370,57 @@ Two limits worth knowing before trusting a number:
   demanding test, and a warning at 33% against a 35% threshold may be a picture that
   is evenly pale rather than one with holes in it.
 
+## 8. Art Director against real Photoshop
+
+The Art Director's output has now been painted in Photoshop 26.11.7 by
+`scripts/paint-in-photoshop.mjs`: directed, compiled to per-layer batches, sent over
+MCP, and the real render pulled back and judged by the same critic.
+`scripts/preview-and-judge.mjs` does the judging alone, because a painting costs
+minutes of fills and a judgement costs a second — re-measuring after a recipe change
+must not mean re-painting.
+
+6 layers, 80 strokes, ~276 s of fills, one layer per plan layer, no failures.
+
+### The mock understates the painting, and by a lot
+
+Same plan, same seed, two renderers:
+
+| Measurement | Mock preview | Photoshop | Divergence |
+| --- | --- | --- | --- |
+| value range | 0.64..1.00 | 0.42..1.00 | twice as dark |
+| RMS contrast | 0.63 | 0.85 | +0.22 |
+| coverage | 33% | 76% | **2.3x** |
+| horizon delta | 0.182 | 0.310 | +0.70 |
+| structure | 94 | 99 | — |
+
+**Every threshold in the critic is currently tuned against the wrong renderer.** The
+mock's `ringFillAlpha` estimates how a synthesized tip's concentric fills overlap;
+Photoshop actually performs them, and the result is darker, denser and higher
+contrast than the estimate. A threshold set on the mock will be set roughly two and
+a half times too low on coverage.
+
+Practical rule: the mock is for plumbing — did the call land, did the layer get
+created, is the stroke count right. Any judgement about how the picture *looks*
+needs Photoshop. The recipe tuning in §5.2 was done on mock previews and is
+therefore directionally right and numerically suspect.
+
+### What the real render shows that the metrics cannot
+
+`structureScore` is **99** on a picture that is not a seascape. Every stamp is a
+visible ring, each glaze reads as a long horizontal tube, and there is one bad
+vertical stroke through the middle of the frame.
+
+The rings are the important finding. A synthesized tip is concentric ellipse fills
+with falling alpha, and in Photoshop the outer edge of the largest disc is a visible
+boundary — a stepped approximation to a soft edge, with the steps showing. It is
+worst against a light ground, which is why the white canvas that §5.2 introduced
+made it worse rather than better.
+
+That is brush work, not recipe work: more `steps`, a lower `outerAlpha`, or both.
+It is the single highest-value fix available and it is in the tip model rather than
+in anything the Art Director controls. The one note the critic did raise —
+`focal-emphasis` at 0.44, the ship not standing out — is real and is recipe work.
+
 ## 6. Working on this
 
 ### Two checkouts — the running one is the Windows one
