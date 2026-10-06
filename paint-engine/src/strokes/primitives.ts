@@ -428,7 +428,7 @@ export function glaze(recipe: StrokeRecipe, rng: Rng): Path[] {
   const thickness = recipe.region.width >= recipe.region.height ? recipe.region.height : recipe.region.width;
 
   const paths: Path[] = [];
-  for (const offsetFraction of passOffsets(recipe.region, recipe.count ?? 3, rng)) {
+  for (const offsetFraction of passOffsets(recipe.region, recipe.count ?? 4, rng)) {
     const shift = offsetFraction * thickness * 0.5 * 0.85;
     // Lengths vary per pass so the ends do not align into a single rounded cap.
     const passLength = length * rng.range(0.82, 1.05);
