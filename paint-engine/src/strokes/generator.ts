@@ -45,6 +45,29 @@ export interface StrokeGeneratorOptions {
   stage: PlanStage;
 }
 
+/**
+ * How firmly a recipe is laid down, as a multiple of the brush's own opacity.
+ *
+ * `energy` was in the plan schema from the start and nothing read it: opacity came
+ * straight from the brush preset, so the director could ask for a sky at full
+ * strength and get the softest wash the preset happened to define. On a white
+ * ground that is the difference between a sky and a faint stain, and the ceiling
+ * was set by the brush rather than by the request.
+ *
+ * The range runs above 1 on purpose. A glaze brush is defined at 0.18 because a
+ * glaze *should* be thin, but a recipe that asks for energy 1 is asking for that
+ * colour at full strength, and the way to get it is more passes of a thin brush —
+ * which costs the same fills and looks better than one opaque pass — so the
+ * multiplier is capped at 1 and the recipes stack instead. Only the soft end is
+ * scaled down: energy below the brush's natural weight is what makes a mark read
+ * as a scumble rather than as a statement.
+ */
+function applyEnergy(base: number, energy: number | undefined): number {
+  if (energy === undefined) return base;
+  if (energy <= 0) return 0;
+  return Math.max(0, Math.min(1, base * (0.35 + 0.65 * energy)));
+}
+
 export class StrokeGenerator {
   private readonly plan: PaintingPlan;
   private readonly stage: PlanStage;
@@ -85,7 +108,7 @@ export class StrokeGenerator {
         brush: preset.id,
         color,
         size: preset.size,
-        opacity: preset.opacity,
+        opacity: applyEnergy(preset.opacity, recipe.energy),
         flow: preset.flow,
         spacing: preset.spacing,
         tip: preset.tip,

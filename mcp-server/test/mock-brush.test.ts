@@ -1,4 +1,5 @@
 import { mkdtempSync, rmSync } from 'node:fs';
+import { inflateSync } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -219,5 +220,101 @@ describe('mock gradients', () => {
     const result = await adapter.paintGradient({ documentId: 'active', stops, bands: 4, smoothRadius: 6 });
     expect(result.success).toBe(true);
     expect(result.smoothed).toBe(false);
+  });
+});
+
+describe('preview ground', () => {
+  let groundDir: string;
+
+  beforeEach(() => {
+    groundDir = mkdtempSync(join(tmpdir(), 'mock-ground-'));
+  });
+
+  afterEach(() => {
+    rmSync(groundDir, { recursive: true, force: true });
+  });
+
+  const makeAdapter = async (background: 'white' | 'background' | 'transparent') => {
+    const adapter = new MockPhotoshopAdapter({
+      workspace: new Workspace(groundDir, join(groundDir, 'out')),
+      demoDocument: false,
+    });
+    await adapter.createDocument({ name: 'ground', width: 64, height: 64, resolution: 72, colorMode: 'RGB', background });
+    return adapter;
+  };
+
+  /**
+   * First pixel of a solid-colour PNG.
+   *
+   * Decoding beats comparing file sizes: both grounds compress to about the same
+   * length, so a size assertion would have passed for the wrong reason — which is
+   * exactly how a hardcoded dark ground survived in the first place.
+   */
+  const firstPixel = (base64: string): number[] => {
+    const png = Buffer.from(base64, 'base64');
+    let bitDepth = 0;
+    let colorType = 0;
+    const idat: Buffer[] = [];
+    let at = 8;
+    while (at < png.length) {
+      const length = png.readUInt32BE(at);
+      const type = png.toString('ascii', at + 4, at + 8);
+      if (type === 'IHDR') {
+        bitDepth = png[at + 16]!;
+        colorType = png[at + 17]!;
+      }
+      if (type === 'IDAT') idat.push(png.subarray(at + 8, at + 8 + length));
+      at += 12 + length;
+    }
+    expect(bitDepth).toBe(8);
+    expect(colorType).toBe(2); // truecolour
+    const channels = 3;
+    const raw = inflateSync(Buffer.concat(idat));
+    // Row 0 is preceded by its filter byte, which is always 0 for this encoder.
+    return [...raw.subarray(1, 1 + channels)];
+  };
+
+  // These two use a transparent document because it is the only one with no
+  // layers: the schematic band that stands in for a layer's artwork is composited
+  // over the ground, so a document with a Background layer proves nothing about the
+  // ground itself.
+  it('keeps the dark ground on a document that asked for no white canvas', async () => {
+    // The preview used to hardcode this dark ground for *every* document. On a
+    // painting engine that is not cosmetic: a palette chosen too dark and a correct
+    // one were indistinguishable in the only artefact anybody looks at, and the low
+    // contrast I first blamed on the recipes was the dark ground all along.
+    const adapter = await makeAdapter('transparent');
+    const png = await adapter.renderPreview({ documentId: 'active', maxWidth: 64 });
+    expect(firstPixel(png.base64)).toEqual([32, 34, 40]);
+  });
+
+  it('makes a white canvas white rather than charcoal', async () => {
+    const adapter = await makeAdapter('white');
+    const png = await adapter.renderPreview({ documentId: 'active', maxWidth: 64 });
+    const [r, g, b] = firstPixel(png.base64);
+    // The Background layer's schematic band composites over the ground, so the
+    // pixel is a blend and not pure 255. What matters is that it is a *light*
+    // grey now: before the fix this read 57,58,71 for the same request.
+    expect(Math.min(r, g, b)).toBeGreaterThan(120);
+  });
+
+  it('lets the ground through the schematic band rather than behind a slate', async () => {
+    const light = firstPixel((await (await makeAdapter('white')).renderPreview({ documentId: 'active', maxWidth: 64 })).base64);
+    const dark = firstPixel((await (await makeAdapter('background')).renderPreview({ documentId: 'active', maxWidth: 64 })).base64);
+    expect(light[0]).toBeGreaterThan(dark[0] + 60);
+  });
+
+  it('changes nothing about how strokes composite', async () => {
+    const adapter = await makeAdapter('white');
+    const before = await adapter.renderPreview({ documentId: 'active', maxWidth: 64 });
+    await adapter.paintStroke({
+      documentId: 'active',
+      points: [{ x: 10, y: 10 }, { x: 50, y: 10 }],
+      brushSize: 20,
+      color: '#000000',
+      opacity: 100,
+    });
+    const after = await adapter.renderPreview({ documentId: 'active', maxWidth: 64 });
+    expect(after.base64).not.toBe(before.base64);
   });
 });

@@ -311,3 +311,63 @@ describe('StrokeGenerator', () => {
     expect(strokes).toEqual([]);
   });
 });
+describe('recipe energy reaches the brush', () => {
+  const stage = (recipe: StrokeRecipe): PlanStage => ({
+    id: 's',
+    layer: 'L',
+    purpose: 'p',
+    brush: 'soft_blend',
+    depth: 'midground',
+    palette: ['midtones'],
+    density: 1,
+    detail: 0.5,
+    progress: 0.5,
+    strokes: [recipe],
+  });
+
+  const plan: PaintingPlan = {
+    title: 't',
+    canvas: { width: 100, height: 100 },
+    style: {
+      medium: 'oil',
+      brushCharacter: 'oil',
+      contrast: 'medium',
+      atmosphere: 'a',
+      texture: 'moderate',
+      edgeCharacter: 'mixed',
+      colorTemperature: 'neutral',
+      detailLevel: 0.5,
+    },
+    composition: { framework: 'center', horizon: 0.5, focalPoint: { x: 0.5, y: 0.5 }, regions: {} },
+    palette: { shadows: ['#000000'], midtones: ['#808080'], highlights: ['#ffffff'], accents: ['#ff0000'], base: ['#808080'] },
+    layers: ['L'],
+    stages: [stage({ primitive: 'line', region: REGION, colorRole: 'midtones' })],
+    seed: 1,
+    maxIterations: 1,
+  };
+
+  const opacityAt = (energy: number | undefined): number => {
+    const s = stage({ primitive: 'line', region: REGION, colorRole: 'midtones', ...(energy === undefined ? {} : { energy }) });
+    return new StrokeGenerator({ plan, stage: s, seed: 3 }).generateStage()[0]!.opacity;
+  };
+
+  it('uses the brush weight when a recipe states no energy', () => {
+    // No energy means "paint it as this brush paints", not "paint it at zero" —
+    // otherwise every recipe written before energy was honoured would go mute.
+    expect(opacityAt(undefined)).toBeGreaterThan(0);
+    expect(opacityAt(undefined)).toBeGreaterThan(opacityAt(0.5));
+  });
+
+  it('lets a recipe mute a mark entirely', () => {
+    expect(opacityAt(0)).toBe(0);
+  });
+
+  it('lays a mark down harder as energy rises', () => {
+    expect(opacityAt(1)).toBeGreaterThan(opacityAt(0.5));
+    expect(opacityAt(0.5)).toBeGreaterThan(opacityAt(0.2));
+  });
+
+  it('keeps the strongest mark at or below the brush ceiling', () => {
+    expect(opacityAt(1)).toBeLessThanOrEqual(1);
+  });
+});

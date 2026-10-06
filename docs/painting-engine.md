@@ -221,12 +221,54 @@ one.
 Verified on this host: 4 strokes, 1139 fills, one call, one layer, 12/12 samples
 moved.
 
-### 5.2 ArtDirector
+### 5.2 ArtDirector — **plumbing done, painting not**
 
-Turn a natural request into a `PaintingPlan`. Should be deterministic first
-(recipes for sky/sea/foam/light), with the model filling in style and palette only.
-`orchestrator/src/gateway/deterministic.ts` already holds paint recipes as prose and
-is the natural seed for it.
+`direct(request, { seed })` in `paint-engine/src/art-director/` turns a request
+into a `PaintingPlan`: `brief.ts` parses what was named, `recipes.ts` holds the
+scene knowledge, `director.ts` resolves composition and palette and assembles.
+No model is involved — the paint engine must not depend on any LLM, and the only
+honest way to honour that is for the thing that decides *what to paint* to be
+inspectable code. A model-backed director can be layered on top and must produce
+the same plan shape, because the engine cannot tell the two apart.
+
+It returns its `assumptions` rather than deciding quietly, and proposes a scene
+palette when the request names no colours. Both exist because the alternative was a
+parser that quietly turns "a calm harbour at dawn" into a storm, with no way for
+the user to tell except by looking at a bad picture.
+
+The original plan said `deterministic.ts` already held paint recipes as prose to
+seed this from. It does not — that file has no painting vocabulary in it at all.
+The knowledge came from the tool descriptions, which is where it should have been
+looked for.
+
+**What it does not do yet: paint.** The output is a blue fog, with rope-like bands
+where the waves are and a scribble where the ship is. Three causes, in order of
+what they cost:
+
+1. **Wave recipes are full-width bands.** Every `wave` region spans `x: 0..1`, so
+   the marks come out as horizontal ropes across the whole canvas. They need to be
+   broken into overlapping segments of varying length.
+2. **`cloud` does not scale down.** At foam-bank size it is a soft rectangle rather
+   than a bank. The primitive is right at cloud size and wrong at foreground size.
+3. **Overall contrast is far too low.** Nothing in the plan asks for a real
+   darkest dark beside a real lightest light, so there is no value range for the
+   drama to live in.
+
+None of these are engine bugs; they are recipe work, and it is the kind that needs
+a person looking at output and saying "that is not a wave". §7 is what would let a
+critic catch some of it without one.
+
+Two engine bugs did turn up while chasing this, both fixed and covered:
+
+- **The preview ignored the document's background.** `renderPreview` hardcoded a
+  dark slate for every document, so a request for a white canvas came back
+  charcoal. Every "the output looks washed out" judgement made before this was
+  fixed was made about the wrong image — a too-dark palette and a correct one were
+  indistinguishable in the only artefact anybody looks at.
+- **`energy` was in the plan schema and nothing read it.** Opacity came straight
+  from the brush preset, so the ceiling on a mark was set by the brush catalog
+  rather than by the request, and a recipe asking for a sky at full strength got
+  whatever wash the preset happened to define.
 
 ### 5.3 Orchestrator wiring
 

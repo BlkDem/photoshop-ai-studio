@@ -144,3 +144,14 @@ export {
   type PaintReport,
   type PaintTarget,
 } from './paint-engine.js';
+export {
+  direct,
+  parseBrief,
+  stagesFor,
+  layersFor,
+  type ArtDirectorOptions,
+  type DirectedPlan,
+  type Brief,
+  type Element,
+  type SceneKind,
+} from './art-director/director.js';

@@ -96,6 +96,16 @@ interface MockText {
   pointY: number;
 }
 
+/**
+ * The default preview ground.
+ *
+ * Kept dark, and deliberately named, because the schematic layer bands are
+ * mid-greys and they are invisible on a light ground. Documents that asked for
+ * white get white instead.
+ */
+const PREVIEW_GROUND: RgbColor = { r: 32, g: 34, b: 40 };
+const WHITE_GROUND: RgbColor = { r: 255, g: 255, b: 255 };
+
 interface MockDocument {
   id: string;
   name: string;
@@ -103,6 +113,16 @@ interface MockDocument {
   height: number;
   resolution: number;
   colorMode: DocumentInfo['colorMode'];
+  /**
+   * What the preview paints behind the artwork.
+   *
+   * Stored on the document rather than passed to the renderer, because a preview
+   * that ignored it was showing every painting on a dark slate: a request for a
+   * white canvas came back charcoal, and a palette that had been chosen too dark
+   * was impossible to tell from one that was correct. Judging a painting engine
+   * on a ground the caller did not ask for is not a preview.
+   */
+  groundColor: RgbColor;
   /** Bottom-to-top stacking order. */
   layers: LayerInfo[];
   texts: Map<number, MockText>;
@@ -259,6 +279,12 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
       height: info.height,
       resolution: info.resolution,
       colorMode: info.colorMode,
+      // `white` means a white canvas, and the schematic band composites over this
+      // ground — so a white document is visibly lighter than a default one. The
+      // other two keep the slate: `background` means the Photoshop background layer,
+      // which the band then covers anyway, and `transparent` has no content at all,
+      // where a white void would read as blank paper rather than as an empty doc.
+      groundColor: params.background === 'white' ? WHITE_GROUND : PREVIEW_GROUND,
     });
     if (params.background !== 'transparent') {
       this.addLayer(doc, {
@@ -1302,7 +1328,7 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
     const png = createSolidPng(
       width,
       height,
-      { r: 32, g: 34, b: 40 },
+      doc.groundColor,
       doc.layers.filter((l) => l.visible).map((l) => ({ ...l, scale })),
       this.previewStrokes(doc, scale),
       this.previewGradients(doc, scale),
@@ -1353,7 +1379,7 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
     const png = createSolidPng(
       width,
       height,
-      { r: 32, g: 34, b: 40 },
+      doc.groundColor,
       doc.layers.filter((l) => l.visible).map((l) => ({ ...l, scale })),
       this.previewStrokes(doc, scale),
       this.previewGradients(doc, scale),
@@ -1372,6 +1398,7 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
       height: init.height,
       resolution: init.resolution ?? 72,
       colorMode: init.colorMode ?? 'RGB',
+      groundColor: init.groundColor ?? PREVIEW_GROUND,
       layers: [],
       texts: new Map(),
       path: init.path ?? null,

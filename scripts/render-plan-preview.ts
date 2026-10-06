@@ -9,7 +9,7 @@
  */
 
 import { writeFileSync } from 'node:fs';
-import { PaintEngine } from '../paint-engine/src/index.js';
+import { PaintEngine, direct } from '../paint-engine/src/index.js';
 import { MockPhotoshopAdapter } from '../mcp-server/src/adapter/mock-adapter.js';
 import { Workspace } from '../mcp-server/src/workspace.js';
 import type { PaintingPlan, PaintTarget } from '../paint-engine/src/index.js';
@@ -19,17 +19,30 @@ import type { PhotoshopAdapter } from '../shared/src/photoshop/adapter.js';
 /**
  * Drives a `PhotoshopAdapter` from the engine.
  *
- * The engine already hands over a whole layer's strokes in one `paint()` call, so
- * this shim's only real decision is transport: it loops per stroke because the
- * current adapter surface is one stroke per call. Replacing the loop with a
- * single `paint_strokes` frame is the batching work the spec asks for, and it
- * belongs here rather than in the engine — the engine must not know how a batch
- * travels.
+ * The engine hands over a whole layer's strokes in one `paint()` call and the
+ * adapter now has a `paint_strokes` operation for exactly that, so the shim is a
+ * direct translation and holds no policy of its own. The layer loop stays here
+ * because the engine calls back per layer and must not know that layers are
+ * created over a wire.
+ *
+ * Failures are collected and reported rather than thrown: a preview that dies on
+ * one bad mark shows nothing at all, and the marks that did paint are still worth
+ * looking at.
  */
 class AdapterPaintTarget implements PaintTarget {
+  /** Strokes Photoshop refused, with the layer they belonged to. */
+  readonly failures: Array<{ layer: string; reason: string }> = [];
+
   constructor(private readonly adapter: PhotoshopAdapter) {}
 
+  private get currentLayer(): string {
+    return this.layerName;
+  }
+
+  private layerName = '';
+
   async ensureLayer(layer: string): Promise<void> {
+    this.layerName = layer;
     const document = await this.adapter.getDocument({ documentId: 'active' });
     const existing = document.layers?.find((l) => l.name === layer);
     if (existing) {
@@ -52,9 +65,11 @@ class AdapterPaintTarget implements PaintTarget {
   }
 
   async paint(strokes: PixelStroke[]): Promise<void> {
-    for (const stroke of strokes) {
-      await this.adapter.paintStroke({
-        documentId: 'active',
+    if (strokes.length === 0) return;
+
+    const result = await this.adapter.paintStrokes({
+      documentId: 'active',
+      strokes: strokes.map((stroke) => ({
         points: stroke.points,
         brushSize: stroke.size,
         color: stroke.color,
@@ -65,7 +80,11 @@ class AdapterPaintTarget implements PaintTarget {
         // Photoshop is being asked to do.
         tip: { core: stroke.tip.core, steps: stroke.tip.steps, outerAlpha: stroke.tip.outerAlpha },
         ...(stroke.blendMode ? { blendMode: stroke.blendMode as never } : {}),
-      });
+      })),
+    });
+
+    for (const failure of result.failures ?? []) {
+      this.failures.push({ layer: this.currentLayer, reason: failure.reason });
     }
   }
 }
@@ -194,18 +213,41 @@ const PLAN: PaintingPlan = {
   maxIterations: 3,
 };
 
+/**
+ * `--request "<text>"` directs the scene from a request instead of using the
+ * hand-written fixture.
+ *
+ * Two paths through one script on purpose: the fixture is what pins the engine's
+ * behaviour, and the request path is what proves the Art Director agrees with it.
+ * A generated plan that only works when nothing about it is random is a fixture
+ * wearing a costume.
+ */
+function planFromArgv(argv: string[]): { plan: PaintingPlan; assumptions: string[] } {
+  const flag = argv.indexOf('--request');
+  if (flag === -1) return { plan: PLAN, assumptions: [] };
+  const request = argv[flag + 1] ?? '';
+  const { plan, assumptions } = direct(request, {
+    canvas: { width: CANVAS.width, height: CANVAS.height },
+    seed: PLAN.seed,
+  });
+  return { plan, assumptions };
+}
+
 async function main(): Promise<void> {
-  const out = process.argv[2] ?? 'workspace/painting-engine-preview.png';
+  const argv = process.argv.slice(2);
+  const out = argv.find((a) => !a.startsWith('--') && argv[argv.indexOf(a) - 1] !== '--request')
+    ?? 'workspace/painting-engine-preview.png';
+  const { plan: requested, assumptions } = planFromArgv(argv);
   const engine = new PaintEngine();
-  const estimate = engine.estimate(PLAN);
+  const estimate = engine.estimate(requested);
 
   const workspace = new Workspace('workspace');
   const adapter = new MockPhotoshopAdapter({ workspace, demoDocument: false });
 
   await adapter.createDocument({
     name: 'moonlit-ocean',
-    width: PLAN.canvas.width,
-    height: PLAN.canvas.height,
+    width: requested.canvas.width,
+    height: requested.canvas.height,
     resolution: 72,
     colorMode: 'RGB',
     background: 'white',
@@ -217,7 +259,7 @@ async function main(): Promise<void> {
       if (phases[phases.length - 1] !== p.phase) phases.push(p.phase);
     },
   });
-  const report = await progressEngine.paintPlan(PLAN, new AdapterPaintTarget(adapter));
+  const report = await progressEngine.paintPlan(requested, new AdapterPaintTarget(adapter));
 
   const doc = await adapter.getDocument({ documentId: 'active' });
 
@@ -229,6 +271,8 @@ async function main(): Promise<void> {
     JSON.stringify(
       {
         out,
+        request: assumptions.length > 0 ? requested.title : null,
+        assumptions,
         estimated: { layers: estimate.layers, strokes: estimate.strokes, fills: estimate.fills },
         painted: { layers: report.layers, strokes: report.strokes, batches: report.batches, fills: report.fills },
         degraded: report.degraded,
