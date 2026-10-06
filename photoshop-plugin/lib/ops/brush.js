@@ -213,7 +213,7 @@ function sameColor(a, b, tolerance) {
  * for a tip with more steps, each stamp becomes a stack of concentric discs
  * filled largest-first at descending alpha.
  */
-function rasterizeAndVerify(doc, selection, stroke, opacity, blendMode, tip, spacing) {
+function rasterizeAndVerify(doc, selection, stroke, opacity, blendMode, tip, spacing, strokeColor) {
   var points = stroke.verificationPoints;
 
   return readSamples(doc, points).then(function (before) {
@@ -223,14 +223,27 @@ function rasterizeAndVerify(doc, selection, stroke, opacity, blendMode, tip, spa
           return readSamples(doc, points).then(function (after) {
             var changed = 0;
             var readable = 0;
+            // How many samples were *already* the colour this stroke paints. A
+            // stroke that changes nothing because it is painting what is underneath
+            // it did its job; one that changes nothing because the layer is hidden
+            // did not, and until these two had separate counters they shared a
+            // code and the honest no-op was reported as a broken stroke.
+            var alreadyThisColor = 0;
 
             for (var i = 0; i < before.length; i += 1) {
               if (before[i] === null || after[i] === null) continue;
               readable += 1;
+              if (strokeColor && sameColor(before[i], strokeColor)) alreadyThisColor += 1;
               if (!sameColor(before[i], after[i])) changed += 1;
             }
 
-            return { painted: painted, samples: points.length, readable: readable, changed: changed };
+            return {
+              painted: painted,
+              samples: points.length,
+              readable: readable,
+              changed: changed,
+              alreadyThisColor: alreadyThisColor,
+            };
           });
         });
       })
@@ -461,7 +474,7 @@ function paintOneStroke(ctx, doc, selection, spec, target, geometryInput) {
 
   return ps
     .withForegroundColor(color, function () {
-      return rasterizeAndVerify(doc, selection, stroke, flatOpacity, blendMode, tip, spec.spacing);
+      return rasterizeAndVerify(doc, selection, stroke, flatOpacity, blendMode, tip, spec.spacing, color);
     })
     .then(function (proof) {
       // Normalised, not `target || docInfo(doc)`: `createStrokeLayer` speaks
@@ -471,12 +484,24 @@ function paintOneStroke(ctx, doc, selection, spec, target, geometryInput) {
       // result as nothing.
       var info = target ? { layerId: target.id, layerName: target.name } : docInfo(doc);
 
-      if (proof.readable > 0 && proof.changed === 0) {
+      // A no-op is not a failure. If every readable sample was already the colour
+      // this stroke paints, the fill did exactly what it was asked to and there was
+      // nothing to change; calling that STEP_FAILED made a plan that had worked
+      // look broken, and sent callers looking for a hidden layer that was not
+      // hidden. Eleven of fifty-three foam strokes were reported this way in one
+      // real run, because foam paints highlights over a sky that is already that
+      // value.
+      var wasNoOp = proof.readable > 0 && proof.changed === 0 && proof.alreadyThisColor === proof.readable;
+
+      if (proof.readable > 0 && proof.changed === 0 && !wasNoOp) {
         throw StudioError(
           'STEP_FAILED',
-          'The stroke was filled but no sampled pixel along the path changed. ' +
-            'The path is probably already the colour being painted, or the target layer is hidden.',
-          { recoverable: false, details: { samples: proof.samples, painted: proof.painted } },
+          'The stroke was filled but no sampled pixel along the path changed, and the path was not already the ' +
+            'colour being painted. The target layer is most likely hidden.',
+          {
+            recoverable: false,
+            details: { samples: proof.samples, painted: proof.painted, alreadyThisColor: proof.alreadyThisColor },
+          },
         );
       }
 
@@ -490,6 +515,9 @@ function paintOneStroke(ctx, doc, selection, spec, target, geometryInput) {
         samplesChecked: proof.readable,
         samplesChanged: proof.changed,
         verified: proof.readable === 0 ? null : proof.changed > 0,
+        // Explicit rather than inferred from `success`: a caller that wants to retry
+        // the strokes that did not land needs to tell a no-op from a failure.
+        noOp: wasNoOp,
         truncated: stroke.truncated,
         // The tip is echoed back so a caller can never mistake a synthesized soft
         // edge for a Photoshop brush preset. `tipIsSynthesized` is unconditionally
@@ -550,6 +578,7 @@ function drawStroke(ctx, geometryInput) {
           samplesChecked: result.samplesChecked,
           samplesChanged: result.samplesChanged,
           verified: result.verified,
+          noOp: result.noOp,
           truncated: result.truncated,
           tip: result.tip,
           tipIsSynthesized: result.tipIsSynthesized,
@@ -624,10 +653,15 @@ function paintStrokes(ctx) {
       var samplesChecked = 0;
       var samplesChanged = 0;
       var truncated = false;
+      // Counted rather than inferred from `success`: separating a no-op from a
+      // failure is only useful if a caller can see how much of the batch did nothing
+      // without reading every stroke in the result.
+      var noOps = 0;
       for (var i = 0; i < painted.length; i++) {
         stampsPainted += painted[i].stampsPainted || 0;
         samplesChecked += painted[i].samplesChecked || 0;
         samplesChanged += painted[i].samplesChanged || 0;
+        if (painted[i].noOp) noOps += 1;
         if (painted[i].truncated) truncated = true;
       }
 
@@ -639,6 +673,7 @@ function paintStrokes(ctx) {
         stampsPainted: stampsPainted,
         samplesChecked: samplesChecked,
         samplesChanged: samplesChanged,
+        strokesNoOp: noOps,
         verified: samplesChecked === 0 ? null : samplesChanged > 0,
         truncated: truncated,
         failures: failures,

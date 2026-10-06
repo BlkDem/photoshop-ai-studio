@@ -451,21 +451,46 @@ and nothing else — so going from 0.3 to 0.06 multiplies stamps fivefold and th
 painting went from 276 s to over six minutes at half size. A tight spacing is a
 direct multiplication on cost and it is being paid for correctness, not efficiency.
 
-The radial-gradient fill per stamp is still the right long-term answer and the reason
-is now measured rather than asserted: it would be smooth at spacing 0.3 — one fill
-per stamp instead of seven — so it removes the scalloping *and* most of the cost at
-once. Nothing in the current path can express it, because every fill is a solid
-colour on a selection. That is a new primitive in
-`photoshop-plugin/lib/ops/brush.js`, and it is the highest-value piece of work left
-in the engine.
+**The radial-gradient fill per stamp is not available on this host, and saying so
+closes a question rather than opening one.** It was the standing "highest-value fix"
+for two commits, on the reasoning that it would be smooth at spacing 0.3 and one fill
+instead of seven. Both halves of that are wrong here:
 
-### A loose end about verification failures
+- `ops/gradient.js` already paints a radial ramp as **concentric filled bands** —
+  `fillBand` selects an ellipse and fills it, largest first, over and over. That is
+  the same trick as `tipRings`, because it is the only trick a solid-colour fill has.
+  The platform's answer to "soft radial falloff" is already in the codebase.
+- A real gradient would need a gradient layer per stamp. This Photoshop build creates
+  pixel layers at 0×0 and ignores the requested size — the reason `paint_gradient`
+  carries an explicit `UNSUPPORTED_OPERATION` for it — so each stamp would need
+  `createLayer` with explicit bounds, a gradient fill, a resize and a merge down.
+  Layer churn is the expensive operation in Photoshop, not the cheap one, so "one
+  batchPlay instead of seven" was never going to hold.
 
-The half-size run reported 11 of 53 foam strokes as `STEP_FAILED` with "no sampled
-pixel along the path changed". Foam paints `highlights` over a sky that may already
-be that value, so these are most likely genuine no-ops rather than failures — but a
-no-op is not currently distinguishable from a broken stroke in the result, and the
-two should not share a code. Not yet investigated.
+So spacing is the lever, it is set from a measurement, and the cost is known. That
+is the whole answer, and it is a worse answer than the plan promised.
+
+### A no-op is not a failure
+
+Fixed. The half-size run reported 11 of 53 foam strokes as `STEP_FAILED` with "no
+sampled pixel along the path changed... or the target layer is hidden". Those foam
+strokes were painting `highlights` over a sky that was already that value, so they
+did their job and had nothing to change — and the result made a working plan look
+broken and sent callers hunting a layer that was not hidden.
+
+The verifier now counts samples that were *already* the stroke's colour. If every
+readable sample was, that is a no-op: `success: true` and `noOp: true`. If nothing
+changed and the canvas was not already that colour, it is still `STEP_FAILED`, and
+the message now names the only remaining explanation rather than offering a
+wrong one. `paint_strokes` counts them as `strokesNoOp`, so a caller can see how much
+of a layer did nothing without reading every stroke.
+
+Two plugin tests pin this, including the one that matters most: the no-op path must
+not swallow the failure it used to share a code with.
+
+**Not verified live.** Photoshop caches a loaded plugin, so reinstalling does not
+reload it — the log after this change still shows the old error message. Verifying it
+needs a Photoshop restart, which is not something to do unattended.
 
 ## 6. Working on this
 

@@ -80,7 +80,7 @@ const WHITE: Rgb = { r: 255, g: 255, b: 255 };
 const BLACK: Rgb = { r: 0, g: 0, b: 0 };
 
 /** A host whose canvas starts white and turns black wherever a fill lands. */
-function drawingHost(width = 400, height = 300): Host {
+function drawingHost(width = 400, height = 300): Host & { pixels: Map<string, Rgb> } {
   const fills: unknown[] = [];
   const ellipses: Host['ellipses'] = [];
   const pixels = new Map<string, Rgb>();
@@ -167,6 +167,56 @@ const runStroke = (brush: BrushModule, params: Record<string, unknown>) =>
   });
 
 describe('stroke_path', () => {
+  /**
+   * A host whose fills land nowhere.
+   *
+   * The normal `drawingHost` writes the fill into its pixel map, which is what makes
+   * `samplesChanged` meaningful. These two cases need fills that leave the canvas
+   * exactly as they found it, because what is being tested is the reporting of
+   * `changed === 0` — which is the state that used to be a single error code for
+   * both "this did nothing because it was already right" and "this did nothing
+   * because the layer is hidden".
+   */
+  function inertHost(pixels: Map<string, Rgb>) {
+    const host = drawingHost();
+    (host.photoshop.action as { batchPlay: unknown }).batchPlay = () => Promise.resolve({});
+    for (const [key, value] of pixels) host.pixels.set(key, value);
+    return host;
+  }
+
+  const filled = (colour: Rgb): Map<string, Rgb> => {
+    const pixels = new Map<string, Rgb>();
+    for (let x = 0; x < 400; x += 1) {
+      for (let y = 0; y < 300; y += 1) pixels.set(`${x},${y}`, colour);
+    }
+    return pixels;
+  };
+
+  it('reports a stroke onto its own colour as a no-op, not a failure', async () => {
+    // Foam paints highlights over a sky that is already that value. That did its
+    // job — there was nothing to change — but it came back as STEP_FAILED with "the
+    // target layer is hidden", which sent callers hunting a layer that was not
+    // hidden. Eleven of fifty-three strokes in one real run.
+    const host = inertHost(filled({ r: 32, g: 64, b: 96 }));
+    const result = (await runStroke(loadBrush(host.photoshop), { color: '#204060' })) as {
+      success: boolean;
+      noOp?: boolean;
+      samplesChanged?: number;
+    };
+
+    expect(result.success).toBe(true);
+    expect(result.noOp).toBe(true);
+    expect(result.samplesChanged).toBe(0);
+  });
+
+  it('still fails a stroke that changed nothing for some other reason', async () => {
+    // The no-op path must not swallow the failure it used to share a code with.
+    const host = inertHost(new Map<string, Rgb>());
+    await expect(runStroke(loadBrush(host.photoshop), { color: '#204060' })).rejects.toMatchObject({
+      code: 'STEP_FAILED',
+    });
+  });
+
   it('draws along the path and proves pixels moved', async () => {
     const host = drawingHost();
     const result = await runStroke(loadBrush(host.photoshop), {});

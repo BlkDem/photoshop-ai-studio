@@ -580,6 +580,23 @@ export const BrushStrokeResultSchema = z.object({
   samplesChecked: z.number().int().optional(),
   /** How many of those samples changed colour. */
   samplesChanged: z.number().int().optional(),
+  /** See `BrushStrokeResultSchema.noOp`: changed nothing because it was already that colour. */
+  noOp: z.boolean().optional(),
+  /**
+   * How many strokes in the batch were no-ops. Counted rather than inferred from
+   * `success`, because "this layer changed nothing" and "this layer worked and had
+   * nothing to add" need to be distinguishable without reading the whole result.
+   */
+  strokesNoOp: z.number().int().optional(),
+  /**
+   * `true` when every readable sample was already the colour the stroke paints, so
+   * the fill did its job and there was nothing to change.
+   *
+   * Separate from `success` and separate from a failure, because it used to share
+   * `STEP_FAILED` with a genuinely hidden layer, which made a plan that had worked
+   * look broken. A caller retrying the strokes that did not land needs to tell the
+   * two apart.
+   */
   /**
    * `null` when the canvas could not be sampled at all, in which case the
    * stroke is unproven rather than proven-and-empty.
@@ -618,6 +635,8 @@ export const PaintStrokesResultSchema = z.object({
   stampsPainted: z.number().int(),
   samplesChecked: z.number().int().optional(),
   samplesChanged: z.number().int().optional(),
+  /** See `BrushStrokeResultSchema.noOp`: changed nothing because it was already that colour. */
+  noOp: z.boolean().optional(),
   verified: z.boolean().nullable().optional(),
   truncated: z.boolean().optional(),
   failures: z
@@ -665,6 +684,8 @@ export const PaintGradientResultSchema = z.object({
   smoothError: z.string().optional(),
   samplesChecked: z.number().int().optional(),
   samplesChanged: z.number().int().optional(),
+  /** See `BrushStrokeResultSchema.noOp`: changed nothing because it was already that colour. */
+  noOp: z.boolean().optional(),
   verified: z.boolean().nullable().optional(),
 });
 export type PaintGradientResult = z.infer<typeof PaintGradientResultSchema>;
