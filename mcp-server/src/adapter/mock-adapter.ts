@@ -34,7 +34,14 @@ import {
   type PaintGradientResult,
 } from '@photoshop-ai-studio/shared';
 import { Workspace } from '../workspace.js';
-import { flattenSegments, rasterizeStamps, type FlatPath } from './stroke-geometry.js';
+import {
+  flattenSegments,
+  rasterizeStamps,
+  ringFillAlpha,
+  tipRings,
+  type FlatPath,
+  type TipModel,
+} from './stroke-geometry.js';
 import {
   gradientVerificationPoints,
   linearBands,
@@ -119,6 +126,16 @@ interface MockStroke {
   color: RgbColor;
   opacity: number;
   stamps: Array<{ x: number; y: number; r: number }>;
+  /**
+   * The synthesized tip this stroke was painted with, if any.
+   *
+   * Stored rather than baked into `stamps` so the preview can be rendered at any
+   * scale: a ring is a fraction of its stamp's radius, so expanding once at
+   * record time would freeze the soft edge at document resolution while the rest
+   * of the preview scales.
+   */
+  tip?: TipModel | null;
+  spacing?: number;
 }
 
 /**
@@ -963,7 +980,9 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
     const smoothing = 'smoothing' in params ? params.smoothing : 0;
     const simulatePressure = 'simulatePressure' in params && params.simulatePressure === true;
 
-    const stamps = rasterizeStamps(path, radius, smoothing, simulatePressure, MAX_MOCK_STAMPS);
+    const tip = 'tip' in params ? (params.tip ?? null) : null;
+    const spacing = params.spacing;
+    const stamps = rasterizeStamps(path, radius, smoothing, simulatePressure, MAX_MOCK_STAMPS, spacing);
     if (stamps.length === 0) {
       throw new StudioException('INVALID_PARAMS', 'The stroke had no usable points.');
     }
@@ -986,6 +1005,8 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
       color: normalizeColor(params.color),
       opacity: params.opacity,
       stamps,
+      tip,
+      spacing,
     });
     doc.saved = false;
 
@@ -996,8 +1017,10 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
       layerName: layer.name,
       brushSize: params.brushSize ?? 5,
       blendMode: params.blendMode,
-      methodUsed: 'rasterized-stroke',
-      stampsPainted: stamps.length,
+      methodUsed: tip ? 'rasterized-stroke-synthesized-tip' : 'rasterized-stroke',
+      tip: tip ?? null,
+      tipIsSynthesized: tip ? true : null,
+      stampsPainted: tip ? stamps.length * tip.steps : stamps.length,
       samplesChecked: onCanvas,
       samplesChanged: onCanvas,
       // Every stamp the mock paints does change the pixels under it, but when
@@ -1049,15 +1072,36 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
     const hidden = new Set(doc.layers.filter((l) => !l.visible).map((l) => l.id));
     return this.strokes
       .filter((stroke) => !hidden.has(stroke.layerId) && stroke.opacity > 0)
-      .flatMap((stroke) =>
-        stroke.stamps.map((stamp) => ({
-          x: stamp.x * scale,
-          y: stamp.y * scale,
-          r: Math.max(0.5, stamp.r * scale),
-          color: stroke.color,
-          opacity: stroke.opacity,
-        })),
-      );
+      .flatMap((stroke) => {
+        const rings = tipRings(stroke.stamps[0]?.r ?? 1, stroke.tip);
+        return stroke.stamps.flatMap((stamp) =>
+          rings.map((ring) => ({
+            x: stamp.x * scale,
+            y: stamp.y * scale,
+            r: Math.max(0.5, ring.radius * scale),
+            color: stroke.color,
+            opacity:
+              stroke.opacity *
+              (rings.length === 1
+                ? 1
+                : ringFillAlpha(
+                    stroke.opacity / 100,
+                    stamp.r,
+                    stroke.spacing,
+                    rings.length,
+                    ring.weight,
+                  )),
+          })),
+        );
+      });
+  }
+
+  /**
+   * Layers that have at least one stroke on them, so the preview can leave their
+   * artwork alone instead of drawing a grey placeholder over it.
+   */
+  private previewPaintedLayerIds(doc: MockDocument): Set<number> {
+    return new Set(this.strokes.map((stroke) => stroke.layerId));
   }
 
   /** The colour a `sample_color` read should report, honouring drawn strokes. */
@@ -1065,10 +1109,15 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
     for (let i = this.strokes.length - 1; i >= 0; i -= 1) {
       const stroke = this.strokes[i]!;
       if (stroke.opacity <= 0) continue;
+      // Hit-test the *innermost* ring: that is the part of a tipped mark that is
+      // actually opaque, so testing the outer falloff would report a colour on
+      // pixels the stroke only tinted.
+      const rings = tipRings(stroke.stamps[0]?.r ?? 1, stroke.tip);
+      const solid = rings[rings.length - 1]?.radius ?? 0;
       for (const stamp of stroke.stamps) {
         const dx = x - stamp.x;
         const dy = y - stamp.y;
-        if (dx * dx + dy * dy <= stamp.r * stamp.r) return stroke.color;
+        if (dx * dx + dy * dy <= solid * solid) return stroke.color;
       }
     }
     return null;
@@ -1179,7 +1228,15 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
     const width = Math.max(1, Math.round(doc.width * scale));
     const height = Math.max(1, Math.round(doc.height * scale));
     mkdirSync(dirname(path), { recursive: true });
-    const png = createSolidPng(width, height, { r: 32, g: 34, b: 40 }, doc.layers.filter((l) => l.visible).map((l) => ({ ...l, scale })), this.previewStrokes(doc, scale), this.previewGradients(doc, scale));
+    const png = createSolidPng(
+      width,
+      height,
+      { r: 32, g: 34, b: 40 },
+      doc.layers.filter((l) => l.visible).map((l) => ({ ...l, scale })),
+      this.previewStrokes(doc, scale),
+      this.previewGradients(doc, scale),
+      this.previewPaintedLayerIds(doc),
+    );
     writeFileSync(path, png);
     return { path, format: 'png', bytes: png.byteLength, overwritten: params.overwrite };
   }
@@ -1222,7 +1279,15 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
     const scale = Math.min(1, params.maxWidth / Math.max(1, doc.width));
     const width = Math.max(1, Math.round(doc.width * scale));
     const height = Math.max(1, Math.round(doc.height * scale));
-    const png = createSolidPng(width, height, { r: 32, g: 34, b: 40 }, doc.layers.filter((l) => l.visible).map((l) => ({ ...l, scale })), this.previewStrokes(doc, scale), this.previewGradients(doc, scale));
+    const png = createSolidPng(
+      width,
+      height,
+      { r: 32, g: 34, b: 40 },
+      doc.layers.filter((l) => l.visible).map((l) => ({ ...l, scale })),
+      this.previewStrokes(doc, scale),
+      this.previewGradients(doc, scale),
+      this.previewPaintedLayerIds(doc),
+    );
     return { mimeType: 'image/png', base64: png.toString('base64'), width, height };
   }
 
@@ -1594,9 +1659,16 @@ function createSolidPng(
     opacity: number;
     bounds: ReadonlyArray<{ left: number; top: number; right: number; bottom: number; color: RgbColor }>;
   }> = [],
+  paintedLayerIds: ReadonlySet<number> = new Set(),
 ): Buffer {
+  // A layer with strokes on it gets no schematic band. The band is a grey
+  // placeholder standing in for artwork that does not exist, and drawing it over
+  // real strokes at 55% alpha washes a whole painting out to the same grey —
+  // which is exactly what it did to the first AI-painting preview, making every
+  // stroke look like it had been ignored. A painted layer's artwork is the
+  // strokes, so the band has nothing left to stand in for.
   const bands = layers
-    .filter((l) => l.width > 0 && l.height > 0)
+    .filter((l) => l.width > 0 && l.height > 0 && !paintedLayerIds.has(l.id))
     .map((l) => ({
       y0: Math.max(0, Math.min(height - 1, Math.round(l.y * l.scale))),
       y1: Math.max(0, Math.min(height, Math.round((l.y + l.height) * l.scale))),
