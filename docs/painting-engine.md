@@ -14,19 +14,23 @@ as real pixels on a real paint layer, with a genuinely soft edge.
 
 | Area | State |
 | --- | --- |
-| `paint-engine/` package | built, 136 tests |
+| `paint-engine/` package | built — 181 tests |
 | Palette / Composition / Depth engines | built, tested |
 | 11 procedural stroke primitives | built, tested |
 | PaintEngine: batching, fill budget, progressive phases | built, tested |
 | Normalized coordinates (resolution independent) | built, tested |
 | Synthesized tips in plugin + mock | built, differential-tested |
 | Stroke verification (pixels actually moved) | working — caught 3 real bugs |
-| Batched `paint_strokes` MCP op | built, tested, measured |
-| ArtDirector (request → PaintingPlan) | **not built** |
-| Orchestrator wiring / checkpoint guard | **not built** |
-| Studio PAINT mode | **not built** |
-| Orchestrator plan building for painting | built and tested; executor mapping not done |
-| VisionCritic + repair loop | **not built** |
+| Batched `paint_strokes` MCP op | built, tested, measured (§4.4) |
+| ArtDirector (request → PaintingPlan) | built, tested — **recipes do not paint yet** (§5.2) |
+| VisionCritic | built, tested — **structure only, not form** (§7) |
+| Orchestrator plan building for painting | built and tested (§5.3) |
+| Orchestrator execution / checkpoint id mapping | **not done** — painting unreachable from `submit()` |
+| Real-Photoshop verification harness | built; found a bug the mock could not (§8) |
+| Plugin build stamp | built; makes "which code is running" answerable |
+| Studio PAINT mode | **not built** (§5.4) |
+| One bounded repair pass on critique | **not built** (§5.5) |
+| `docs/brush-system.md`, `semantic-strokes.md`, `art-director.md`, `vision-critic.md` | **not written** (§5.6) |
 
 Tests: **565 passing** (23 files), identical in both checkouts. Lint is clean except
 7 pre-existing errors in files this work has never touched.
@@ -311,6 +315,18 @@ pause/stop.
 Preview → structured critique → one bounded repair pass. The deterministic
 critique is worth building before the model-based one; the plumbing is the work.
 
+The deterministic half is built: `critique()` measures a rendered PNG and reports
+findings with the number behind each one (§7). The repair pass is not — a bounded
+loop that adjusts a plan against its own findings is the obvious next piece, and it
+is the first thing here that would be an *automated* quality loop rather than a
+person looking at a picture.
+
+Measured on this host, the deterministic critic is worth its cost: it took the Art
+Director from 71 to 94 on its own metrics and found three engine bugs that looking
+would not have — a hardcoded preview ground, a full-canvas unifying glaze, and the
+background layer's placeholder drawn over the top of the painting. Its limit is
+equally measured: `structureScore` reads 99 on a picture that is not a seascape.
+
 ### 5.6 Remaining docs
 
 `docs/brush-system.md`, `docs/semantic-strokes.md`, `docs/art-director.md`,
@@ -512,6 +528,35 @@ So the defect is upstream: a plan should not ask for sixty dabs of one colour in
 region. That is recipe work. Weakening verification to hide it would have moved a real
 bug out of sight, which is how it would have been found again much later and much more
 expensively.
+
+## 5a. What is left, in order
+
+Ranked by what unblocks the most, not by what is easiest.
+
+1. **Wave and foam recipes (§5.2).** The one defect the critic provably cannot
+   catch, because it does not judge form: wave regions span the full canvas width
+   and come out as horizontal ropes, and `cloud` does not scale down to foam-bank
+   size so a bank of foam is a soft rectangle. Needs someone looking at output and
+   saying "that is not a wave". The critic will keep them honest about contrast and
+   value range while they work.
+2. **`scatteredDabs` density in the foam recipe.** Nine of fifty-three strokes fail
+   verification because the plan asks for forty-plus dabs of one colour into one
+   region and the later ones land on the earlier ones. A plan defect (§8), and the
+   first thing a bounded repair pass would be able to fix on its own.
+3. **The executor's checkpoint id mapping (§5.3).** Painting is unreachable from
+   `submit()` until the executor resolves the duplicate's id and redirects the paint
+   steps at it. Small, mechanical, and the last thing between the engine and the
+   product.
+4. **The bounded repair pass (§5.5).** Take the critic's findings, adjust the plan,
+   repaint, once. This is the only item that turns the quality loop from manual to
+   automatic.
+5. **Studio PAINT mode (§5.4).** Approval before painting and live progress.
+6. **The four remaining docs (§5.6).** Last. They record decisions that are already
+   written down here.
+
+Not on the list any more, because measurement closed them: a per-stamp radial
+gradient (§8 — the platform's answer is concentric bands), and loosening stroke
+verification to absorb no-op strokes (§8 — it would hide a real defect).
 
 ## 6. Working on this
 
