@@ -50,9 +50,14 @@ const logPath = process.env.PLUGIN_LOG
 const mcpLog = process.env.MCP_LOG ?? 'logs/mcp.log';
 
 let running;
+let connected = false;
 if (existsSync(mcpLog)) {
-  const matches = [...readFileSync(mcpLog, 'utf8').matchAll(/plugin build ([0-9a-f]{12})/g)];
+  const text = readFileSync(mcpLog, 'utf8');
+  const matches = [...text.matchAll(/plugin build ([0-9a-f]{12})/g)];
   running = matches.length > 0 ? matches[matches.length - 1][1] : undefined;
+  // A plugin that connected without a buildId is the specific case worth naming:
+  // it is running a build from before the stamp existed.
+  connected = /Connected to photoshop/.test(text);
 }
 
 console.log(`sources on disk : ${disk}`);
@@ -61,7 +66,13 @@ console.log(`running plugin  : ${running ?? '(no hello in the mcp log yet)'}`);
 void logPath;
 
 if (!running) {
-  console.log('\nUnknown: no plugin has connected to this log yet.');
+  console.log(
+    connected
+      ? '\nMISMATCH, and no worse than expected: the plugin connected without a buildId, so it is running a\n' +
+          'build from before the stamp existed. The code on disk is newer than the code in memory.'
+      : '\nUnknown: no plugin has connected to this log yet.',
+  );
+  if (connected) process.exitCode = 1;
 } else if (running === disk) {
   console.log('\nMatch. Photoshop is running the code on disk.');
 } else {
