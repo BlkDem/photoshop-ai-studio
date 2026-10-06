@@ -154,6 +154,8 @@ Requires Node ≥ 20.11. No global installs, no `pnpm`, no `npm link`.
 - **[docs/setup.md](docs/setup.md)** — setup for both paths, configuration,
   troubleshooting.
 - **[docs/mcp-tools.md](docs/mcp-tools.md)** — generated tool reference.
+- **[docs/painting-engine.md](docs/painting-engine.md)** — the AI painting engine:
+  what is verified against this Photoshop, its limits, and what is next.
 
 ---
 
