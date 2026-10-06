@@ -410,35 +410,62 @@ therefore directionally right and numerically suspect.
 visible ring, each glaze reads as a long horizontal tube, and there is one bad
 vertical stroke through the middle of the frame.
 
-The rings are the important finding, and **the obvious fix for them is wrong.**
+### What the real render shows that the metrics cannot
 
-The first hypothesis was that `outerAlpha` was too high: `tipRings` puts the
-outermost disc at that weight, so at `0.35` the alpha jumps from nothing to a third
-of full within a pixel of the rim, and a step discontinuity at the rim is exactly
-what a visible ring is. Dropping `outerAlpha` to 0.03–0.08 and raising `steps` to
-5–7 was tried in real Photoshop. It did not remove the rings. It raised contrast
-0.85 → 0.93 and coverage 76% → 80%, and it caused five strokes to start failing
-verification — fainter stamps, and the sampled pixels no longer changed, so
-`paint_strokes` reported them as `STEP_FAILED`. Reverted rather than committed: a
-change that misses its stated goal and breaks five strokes is worse than no change.
+`structureScore` is **99** on a picture that is not a seascape. Structure is not
+painting, and this is where that stops being an abstraction.
 
-**The cause is structural.** A synthesized tip is a handful of concentric filled
-ellipses. Six discs make six bands, whatever the alphas are — a step function cannot
-be a ramp, and lowering the step height just makes the bands faint rather than
-fewer. The rings are not an artefact of the alphas; they are what a discrete
-approximation to a radial gradient looks like when there are six of them.
+The first render's dominant defect was a ring pattern along every mark. **The
+diagnosis recorded in the previous commit was wrong**, and the way it was wrong is
+worth keeping, because it is a trap this codebase makes easy to fall into again.
 
-The fix is therefore not a number in the brush catalog. It is a different fill:
-a **radial gradient** from the colour at the centre to fully transparent at the rim,
-which is smooth by construction and is one `batchPlay` call instead of six. Nothing
-in the current fill path can express it, because every fill is a solid colour on a
-selection. That is a new primitive in `photoshop-plugin/lib/ops/brush.js` plus a
-matching ramp in `tipRings`' place, and it is the highest-value piece of work left
-in the painting engine — more valuable than any recipe, because it changes what
-every mark in every picture looks like.
+The claim was that the rings were the tip's concentric fills, and that lowering
+`outerAlpha` would remove them. Tried in real Photoshop: `outerAlpha` 0.35 → 0.03,
+`steps` 3 → 7. The rings did not go away. Contrast rose and five strokes started
+failing verification, so it was reverted.
 
-The one note the critic raised that *is* recipe work: `focal-emphasis` at 0.44, the
-ship not standing out from the water behind it.
+The reason it failed is that `ringFillAlpha` multiplies the base alpha by the ring's
+weight, so at `outerAlpha: 0.03` the outermost disc carries ~0.075% alpha and is
+already invisible. The rings could not have been coming from there.
+
+They are the **scalloped outer boundary of overlapping stamps**. A stroke is a run of
+solid discs, and each disc has a hard edge; the union of a row of overlapping discs
+is a row of arcs. `scripts/spacing-test.mjs` paints one stroke at four spacings and
+settles it:
+
+| spacing | 90px stroke | edge |
+| --- | --- | --- |
+| 0.3 | 12 s | visibly scalloped |
+| 0.12 | 46 s | still scalloped |
+| 0.05 | 92 s | clean |
+| 0.02 | 123 s | clean, no gain over 0.05 |
+
+So the fix is spacing, and the catalog is now set from that table: 0.05–0.08 for the
+brushes whose job is a soft edge, left loose for `dry_brush` and the glaze, whose
+character is made of the gaps. Re-painted in Photoshop at that spacing: the
+scalloping is gone, contrast 0.93 → 1.00, value range 0.42..1.00 → 0.21..1.00,
+coverage 76% → 87%.
+
+**This is not free.** Fills dominate painting time — the §4.4 measurement was that
+and nothing else — so going from 0.3 to 0.06 multiplies stamps fivefold and the same
+painting went from 276 s to over six minutes at half size. A tight spacing is a
+direct multiplication on cost and it is being paid for correctness, not efficiency.
+
+The radial-gradient fill per stamp is still the right long-term answer and the reason
+is now measured rather than asserted: it would be smooth at spacing 0.3 — one fill
+per stamp instead of seven — so it removes the scalloping *and* most of the cost at
+once. Nothing in the current path can express it, because every fill is a solid
+colour on a selection. That is a new primitive in
+`photoshop-plugin/lib/ops/brush.js`, and it is the highest-value piece of work left
+in the engine.
+
+### A loose end about verification failures
+
+The half-size run reported 11 of 53 foam strokes as `STEP_FAILED` with "no sampled
+pixel along the path changed". Foam paints `highlights` over a sky that may already
+be that value, so these are most likely genuine no-ops rather than failures — but a
+no-op is not currently distinguishable from a broken stroke in the result, and the
+two should not share a code. Not yet investigated.
 
 ## 6. Working on this
 

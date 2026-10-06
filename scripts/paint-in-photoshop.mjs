@@ -26,7 +26,15 @@ import { dirname } from 'node:path';
 import { direct, PaintEngine, strokeToPixels, critiquePng, formatCritique } from '../paint-engine/dist/index.js';
 
 const MCP_URL = process.env.MCP_URL ?? 'http://127.0.0.1:3001/mcp';
-const CANVAS = { width: 960, height: 540 };
+/**
+ * Canvas size, overridable because fill cost scales with it and a tight spacing
+ * multiplies fills again: the full 960x540 painting at spacing 0.06 runs for hours.
+ * A half-size render answers the same question about edge quality in minutes.
+ */
+const CANVAS = {
+  width: Number(process.env.PAINT_WIDTH ?? 960),
+  height: Number(process.env.PAINT_HEIGHT ?? 540),
+};
 
 async function connect() {
   const client = new Client({ name: 'paint-in-photoshop', version: '0.1.0' });

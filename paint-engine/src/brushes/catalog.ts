@@ -47,6 +47,26 @@ export const DEPTH_RESPONSE: Record<DepthZone, DepthResponse> = {
 /**
  * The MVP set from the spec: six sizes/behaviours, plus the two that glazing and
  * broken texture need.
+ *
+ * **Spacing is measured, not guessed.** A stroke is a run of overlapping discs, and
+ * each disc has a hard outer edge, so the boundary of a stroke is the scalloped
+ * union of its stamps. At spacing 0.3 that scalloping is unmissable — the first
+ * real render came back looking like rope, and the cause was read as the tip's
+ * concentric fills rather than as the stamps. `scripts/spacing-test.mjs` paints one
+ * stroke at 0.3 / 0.12 / 0.05 / 0.02 and settles it: 0.3 and 0.12 are visibly
+ * scalloped, 0.05 is clean, and 0.02 costs a third more than 0.05 for nothing
+ * visible.
+ *
+ * The costs are steep and honest: one 90px stroke took 12s at 0.3, 46s at 0.12 and
+ * 92s at 0.05. Fills dominate painting time, so a tighter spacing is a direct
+ * multiplication on cost, and it is not free money. It is worth paying for the
+ * brushes whose whole job is a soft edge, and the tightest values are reserved for
+ * those; `dry_brush` and `glaze` want the gaps, because their character is made of
+ * them.
+ *
+ * The real answer is a radial-gradient fill per stamp — smooth by construction and
+ * one fill instead of seven — which no solid-colour-on-a-selection fill can express.
+ * Until that exists, this table is the trade.
  */
 export const BRUSHES: readonly BrushPreset[] = Object.freeze([
   {
@@ -55,7 +75,7 @@ export const BRUSHES: readonly BrushPreset[] = Object.freeze([
     size: 0.16,
     opacity: 0.55,
     flow: 0.7,
-    spacing: 0.3,
+    spacing: 0.06,
     tip: { core: 0.55, steps: 3, outerAlpha: 0.35 },
     tipIsSynthesized: true,
   },
@@ -65,7 +85,7 @@ export const BRUSHES: readonly BrushPreset[] = Object.freeze([
     size: 0.085,
     opacity: 0.7,
     flow: 0.75,
-    spacing: 0.28,
+    spacing: 0.06,
     tip: { core: 0.6, steps: 3, outerAlpha: 0.35 },
     tipIsSynthesized: true,
   },
@@ -75,7 +95,7 @@ export const BRUSHES: readonly BrushPreset[] = Object.freeze([
     size: 0.045,
     opacity: 0.8,
     flow: 0.8,
-    spacing: 0.26,
+    spacing: 0.07,
     tip: { core: 0.68, steps: 2, outerAlpha: 0.4 },
     tipIsSynthesized: true,
   },
@@ -85,7 +105,7 @@ export const BRUSHES: readonly BrushPreset[] = Object.freeze([
     size: 0.022,
     opacity: 0.9,
     flow: 0.85,
-    spacing: 0.24,
+    spacing: 0.08,
     tip: { core: 0.78, steps: 2, outerAlpha: 0.45 },
     tipIsSynthesized: true,
   },
@@ -96,7 +116,7 @@ export const BRUSHES: readonly BrushPreset[] = Object.freeze([
     size: 0.2,
     opacity: 0.3,
     flow: 0.5,
-    spacing: 0.45,
+    spacing: 0.05,
     tip: { core: 0.18, steps: 4, outerAlpha: 0.18 },
     tipIsSynthesized: true,
   },
@@ -106,7 +126,7 @@ export const BRUSHES: readonly BrushPreset[] = Object.freeze([
     size: 0.03,
     opacity: 1,
     flow: 1,
-    spacing: 0.18,
+    spacing: 0.08,
     tip: { core: 1, steps: 1, outerAlpha: 1 },
     tipIsSynthesized: true,
   },
@@ -118,7 +138,7 @@ export const BRUSHES: readonly BrushPreset[] = Object.freeze([
     size: 0.07,
     opacity: 0.45,
     flow: 0.4,
-    spacing: 0.5,
+    spacing: 0.06,
     tip: { core: 0.34, steps: 4, outerAlpha: 0.12 },
     tipIsSynthesized: true,
   },
