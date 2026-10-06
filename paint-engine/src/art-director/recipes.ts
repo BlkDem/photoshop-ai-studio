@@ -20,6 +20,67 @@ type Rng = { range(min: number, max: number): number; gaussian(): number; chance
 
 type Rect = { x: number; y: number; width: number; height: number };
 
+/**
+ * A value gradient, built the way a painter builds one.
+ *
+ * Disjoint bands do not blend: each is a flat value and the seam between them is a
+ * hard edge, which is why three stacked glazes produced a sky made of slabs rather
+ * than of air. The fix is overlap. Every pass here spans most of the area and carries
+ * one value, and the values step across the passes — so where two meet they mix, and
+ * no boundary is ever visible because there is no boundary: only the average of
+ * everything laid over that part of the canvas.
+ *
+ * Passes walk from the far edge of the region toward the near one, reading `roles` in
+ * order, so `['shadows', 'midtones', 'highlights']` darkens from the far edge inward.
+ */
+function gradientWashes(
+  region: Rect,
+  roles: NonNullable<StrokeRecipe['colorRole']>[],
+  options: { passes?: number; rng: Rng; energy?: number },
+): StrokeRecipe[] {
+  const passes = Math.max(2, options.passes ?? roles.length * 2);
+  const rng = options.rng;
+  const out: StrokeRecipe[] = [];
+
+  for (let i = 0; i < passes; i += 1) {
+    const t = passes === 1 ? 0 : i / (passes - 1);
+    // Centre walks the *short* intended span, while the region below deliberately
+    // reaches far past it.
+    const intended = region.height * 0.35;
+    const centre = region.y + intended / 2 + (region.height - intended) * t;
+
+    // The region overshoots the area it is meant to describe, and always has.
+    //
+    // Three attempts got this far, and the third one is the one that works. The first
+    // stacked disjoint bands and the seams showed. The second overlapped them heavily
+    // and the values blended — but every pass still ended *somewhere*, and where it
+    // ended was a hard edge: two attempts at breaking that inside the glaze primitive
+    // failed, and a real render showed why. Clipping a pass to a sub-region makes its
+    // own boundary the gradient.
+    //
+    // So the passes span the whole area and reach past it, and the gradient comes from
+    // how much of each colour is laid down rather than from where each pass stops. The
+    // energy ramps with the pass so the far edge is dominated by the dark and the near
+    // edge by the light, with every colour present everywhere in between.
+    const reach = region.height * 1.5;
+    out.push({
+      primitive: 'glaze',
+      region: fit({
+        x: region.x - 0.12,
+        y: centre - reach / 2,
+        width: Math.min(1, region.width + 0.24),
+        height: reach,
+      }),
+      colorRole: roles[Math.min(roles.length - 1, Math.floor(t * roles.length))],
+      // Ramp the strength along the gradient as well as changing the colour, so the
+      // dark end is not just a different hue but a heavier hand.
+      energy: (options.energy ?? 0.75) * (0.45 + 0.55 * (1 - t)) * rng.range(0.9, 1.05),
+      jitter: rng.range(0.15, 0.4),
+    });
+  }
+  return out;
+}
+
 /** Vertical band as a normalized region, from a horizon down to the bottom. */
 function band(y: number, height: number): Rect {
   return fit({ x: 0, y, width: 1, height });
@@ -59,44 +120,37 @@ function clamp01(value: number): number {
  * a sky painted with strokes reads as strokes, because every mark keeps its own
  * shape no matter how faint it is. Stacking fades is what stops that.
  */
-function skyStage(brief: Brief, horizon: number): PlanStage {
-  const strokes: StrokeRecipe[] = [
-    // Midtones, not shadows. A dark sky over a dark sea has no horizon: the first
-    // version built both from `shadows` and the two thirds of the picture collapsed
-    // into one flat field with an invisible line down the middle of it.
-    { primitive: 'glaze', region: band(0, horizon * 0.98), colorRole: 'midtones', energy: 1 },
-    // Light at the horizon, and the value falling away above it. A sky painted at
-    // one value is a backdrop, not weather.
-    { primitive: 'glaze', region: band(horizon * 0.62, horizon * 0.38), colorRole: 'highlights', energy: 0.9 },
-  ];
-
-  // A dark weight at the top of the sky, always. This is the top of the value range
-  // on the sky side, and without it a bright sky has no ceiling for the clouds to
-  // be darker than.
-  strokes.unshift({ primitive: 'glaze', region: band(0, horizon * 0.5), colorRole: 'shadows', energy: 1 });
+function skyStage(brief: Brief, horizon: number, rng: Rng): PlanStage {
+  // Dark above, light toward the horizon, built from overlapping washes. Far edge is
+  // the top of the sky.
+  const strokes: StrokeRecipe[] = gradientWashes(
+    { x: 0, y: 0, width: 1, height: horizon * 0.98 },
+    ['shadows', 'midtones', 'highlights'],
+    { passes: 5, rng, energy: 0.8 },
+  );
 
   if (brief.atmosphere === 'golden' || brief.colorTemperature === 'warm') {
-    // Warm light low in the sky, near the horizon, because that is where a low
-    // sun puts it.
-    strokes.push({
-      primitive: 'glaze',
-      region: band(horizon * 0.55, horizon * 0.45),
-      colorRole: 'accents',
-      energy: 0.45,
-      blendMode: 'screen',
-    });
+    // Warm light low in the sky, near the horizon, because that is where a low sun
+    // puts it. Two overlapping passes, not one: a single accent band is another seam.
+    strokes.push(
+      ...gradientWashes({ x: 0, y: horizon * 0.45, width: 1, height: horizon * 0.55 }, ['accents', 'highlights'], {
+        passes: 2,
+        rng,
+        energy: 0.5,
+      }),
+    );
   }
 
   return {
     id: 'sky',
     layer: 'Sky',
-    purpose: 'Sky base and depth',
+    purpose: 'Sky, dark above and light toward the horizon',
     // oil_large, not soft_blend. soft_blend is defined at 0.3 opacity and 0.18 for
     // glaze, which is right for a glaze and useless for laying in a sky: on a
     // white ground two passes of it produced a picture with no tone in it at all.
     brush: 'oil_large',
     depth: 'background',
-    palette: ['shadows', 'midtones'],
+    palette: ['shadows', 'midtones', 'highlights'],
     density: 1,
     detail: 0.15,
     progress: 0.08,
@@ -201,27 +255,15 @@ function landStage(horizon: number, rng: Rng): PlanStage {
  */
 function waterStage(horizon: number, rng: Rng, detail: number): PlanStage {
   const depth = 1 - horizon;
+  // Lighter at the horizon, darker toward the viewer, built from overlapping washes
+  // for the same reason the sky is: stacked flat bands show their seams, and seams
+  // are what made this look like sheets of plywood.
   const strokes: StrokeRecipe[] = [
-    // Three passes: one dark, then two lighter, because a single glaze over a
-    // ground the sky already darkened has nothing to build on and reads as a
-    // flat sheet of the darkest value in the palette.
-    { primitive: 'glaze', region: band(horizon, depth), colorRole: 'shadows', energy: 0.9 },
-    { primitive: 'glaze', region: band(horizon, depth * 0.5), colorRole: 'shadows', energy: 0.5 },
-    { primitive: 'glaze', region: band(horizon + depth * 0.45, depth * 0.55), colorRole: 'midtones', energy: 0.45 },
-    // The deepest value in the picture, at the front. Water gets darker toward the
-    // viewer because it is further from the light and in its own shadow, and a
-    // painting with no dark in it has nothing for its lights to read against.
-    //
-    // Four passes, because one does not reach. A single stroke of the darkest colour
-    // in the palette lands nowhere near it: the tip is a soft blob with a partial
-    // core and the preview splits it into rings that each deposit a fraction of the
-    // opacity. The critic measured the result at a luminance of 0.78 when the
-    // palette's darkest is 0.10, so the value has to be built the way a painter
-    // builds it — repeatedly, and never in one pass.
-    { primitive: 'glaze', region: band(horizon + depth * 0.72, depth * 0.28), colorRole: 'shadows', energy: 1 },
-    { primitive: 'glaze', region: band(horizon + depth * 0.6, depth * 0.4), colorRole: 'shadows', energy: 1 },
-    { primitive: 'glaze', region: band(horizon + depth * 0.5, depth * 0.5), colorRole: 'shadows', energy: 0.9, jitter: 0.25 },
-    { primitive: 'glaze', region: band(horizon, depth), colorRole: 'shadows', energy: 0.8, jitter: 0.3 },
+    ...gradientWashes({ x: 0, y: horizon, width: 1, height: depth }, ['midtones', 'shadows', 'shadows'], {
+      passes: 5,
+      rng,
+      energy: 0.85,
+    }),
   ];
 
   const bands = 3 + Math.round(detail * 3);
@@ -233,20 +275,42 @@ function waterStage(horizon: number, rng: Rng, detail: number): PlanStage {
     // not, and the plan schema rejects it.
     const bandHeight = Math.min(depth - (bandTop - horizon), (depth / bands) * rng.range(0.9, 1.5));
     if (bandHeight <= 0.01) continue;
-    strokes.push({
-      primitive: 'wave',
-      region: band(bandTop, bandHeight),
-      // Near the horizon the marks are small and dark; near the viewer, large and
-      // lighter, which is how reflected light behaves on a moving surface.
-      colorRole: t < 0.4 ? 'shadows' : 'midtones',
-      // High frequency and a small amplitude keep the wave path tight so
-      // consecutive stamps overlap into a sheet. Wide spacing and big amplitudes
-      // gave chains of separate blobs, which read as beads on a string.
-      frequency: rng.range(6, 9 + t * 6),
-      amplitude: 0.012 + t * 0.02,
-      energy: 0.35 + t * 0.25,
-      jitter: 0.1 + t * 0.15,
-    });
+    // Segments, not one band across the canvas. A `wave` region spanning the full
+    // width is a single horizontal line from edge to edge, and the water in every
+    // render so far has been a stack of those — ropes. Real water is not continuous
+    // across a frame: it is a run of separate swells at different lengths and
+    // offsets, and breaking the band is what lets them overlap into a surface.
+    const segments = 2 + Math.round(rng.range(0, 2));
+    for (let k = 0; k < segments; k += 1) {
+      const width = Math.min(1, rng.range(0.35, 0.8));
+      strokes.push({
+        primitive: 'wave',
+        region: fit({
+          x: rng.range(-0.08, Math.max(0, 1 - width)),
+          // Reaches past the band above and below it. A swell that stops exactly at
+          // its band draws a rounded edge there, and a run of them is the plywood.
+          y: bandTop - bandHeight * 0.6 + rng.range(-0.02, 0.02),
+          width,
+          height: bandHeight * 2.2,
+        }),
+        // Texture, not value.
+        //
+        // The wash below already carries the water's value, dark toward the viewer.
+        // Giving the waves a value of their own put a dark capsule on top of a dark
+        // field and the segment's own length became its silhouette — the rounded dark
+        // rectangles in the last render. Waves are how a *value field* is broken up,
+        // not a second value field laid over the first, so they take the same role as
+        // the water under them and only a little more of it.
+        colorRole: t < 0.35 ? 'shadows' : 'midtones',
+        // High frequency and a small amplitude keep the wave path tight so
+        // consecutive stamps overlap into a sheet. Wide spacing and big amplitudes
+        // gave chains of separate blobs, which read as beads on a string.
+        frequency: rng.range(6, 9 + t * 6),
+        amplitude: 0.012 + t * 0.02,
+        energy: 0.14 + t * 0.12,
+        jitter: 0.1 + t * 0.15,
+      });
+    }
   }
 
   return {
@@ -272,18 +336,18 @@ function waterStage(horizon: number, rng: Rng, detail: number): PlanStage {
 function foamStage(horizon: number, rng: Rng, strength: number): PlanStage {
   const depth = 1 - horizon;
   const strokes: StrokeRecipe[] = [];
-  const banks = 2 + Math.round(strength * 3);
+  const banks = 3 + Math.round(strength * 4);
 
   for (let i = 0; i < banks; i += 1) {
     strokes.push({
       primitive: 'cloud',
       region: {
-        x: rng.range(0, 0.6),
+        x: rng.range(-0.1, 0.9),
         // Weighted low. Spray belongs at the front of the picture; foam scattered
         // evenly from the horizon to the bottom edge reads as dust on a lens.
-        y: horizon + depth * rng.range(0.55, 0.99),
-        width: rng.range(0.35, 0.7),
-        height: depth * rng.range(0.04, 0.1),
+        y: horizon + depth * rng.range(0.5, 0.99),
+        width: rng.range(0.2, 0.5),
+        height: depth * rng.range(0.03, 0.08),
       },
       colorRole: 'highlights',
       energy: rng.range(0.5, 0.95),
@@ -292,8 +356,12 @@ function foamStage(horizon: number, rng: Rng, strength: number): PlanStage {
 
   strokes.push({
     primitive: 'scatteredDabs',
-    region: band(horizon + depth * 0.6, depth * 0.4),
-    count: Math.round(20 + strength * 40),
+    region: band(horizon + depth * 0.45, depth * 0.55),
+    // Spread over the whole foreground rather than concentrated. Forty-plus dabs of
+    // one colour into one region meant the later ones landed on the colour the
+    // earlier ones had just produced — nine of fifty-three strokes reported nothing
+    // changed, which was the plan's fault and not the verifier's.
+    count: Math.round(14 + strength * 20),
     jitter: 0.5,
     colorRole: 'highlights',
   });
@@ -440,7 +508,7 @@ function glazeStage(brief: Brief, horizon: number, rng: Rng): PlanStage {
  * still reads as the picture at a rougher stage of itself.
  */
 export function stagesFor(brief: Brief, horizon: number, focal: { x: number; y: number }, rng: Rng): PlanStage[] {
-  const stages: PlanStage[] = [skyStage(brief, horizon)];
+  const stages: PlanStage[] = [skyStage(brief, horizon, rng)];
 
   if (brief.elements.includes('clouds')) stages.push(cloudStage(brief, horizon, rng));
   if (brief.scene === 'landscape' && brief.elements.includes('mountains')) {
@@ -451,13 +519,23 @@ export function stagesFor(brief: Brief, horizon: number, focal: { x: number; y: 
     // Crests belong to the water stage, so they ride the same bands and inherit
     // their depth. Painting them separately from the water is how they end up
     // floating at one uniform distance.
-    water.strokes.push({
-      primitive: 'highlight',
-      region: band(horizon + (1 - horizon) * 0.45, (1 - horizon) * 0.55),
-      colorRole: 'highlights',
-      energy: 0.35,
-      jitter: 0.4,
-    });
+    // Crests. Light marks riding the swells, so they read as light on water rather
+    // than as a pale sheet laid over it.
+    for (let i = 0; i < 3; i += 1) {
+      const width = rng.range(0.2, 0.55);
+      water.strokes.push({
+        primitive: 'highlight',
+        region: fit({
+          x: rng.range(-0.05, Math.max(0, 1 - width)),
+          y: horizon + (1 - horizon) * rng.range(0.35, 0.9),
+          width,
+          height: (1 - horizon) * rng.range(0.02, 0.06),
+        }),
+        colorRole: 'highlights',
+        energy: rng.range(0.3, 0.6),
+        jitter: 0.4,
+      });
+    }
     stages.push(water);
   }
   if (brief.hasGround && brief.scene === 'landscape' && !brief.elements.includes('mountains')) {
