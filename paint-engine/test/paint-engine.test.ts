@@ -322,8 +322,9 @@ describe('PaintEngine.estimate', () => {
     const estimate = engine.estimate(PLAN);
     expect(estimate.layers).toBe(4);
     // 1 sky glaze + 2 wave masses + 1 cloud + 10 scattered dabs (20 x density 0.5)
-    // + 1 crest highlight.
-    expect(estimate.strokes).toBe(15);
+    // + 1 crest highlight, with the glaze and the cloud at three passes each because
+    // a single swept path paints a line and both are used to lay in a field.
+    expect(estimate.strokes).toBe(17);
     expect(estimate.fills).toBeGreaterThan(estimate.strokes);
     expect(estimate.truncated).toBe(0);
   });

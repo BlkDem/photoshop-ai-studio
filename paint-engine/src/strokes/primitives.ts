@@ -199,26 +199,46 @@ export function cloud(recipe: StrokeRecipe, rng: Rng): Path[] {
   const c = center(recipe.region);
   const length = span(recipe.region);
   const lobes = Math.max(3, Math.round(length * 6 * (0.5 + (recipe.energy ?? 0.6))));
-  const amplitude = (recipe.amplitude ?? 0.4) * recipe.region.height * 0.5;
+  // Amplitude off the region's *short* axis, so a shallow foam bank is as billowy as
+  // a tall cloud. It used to be scaled by the height, which meant the flatter the
+  // bank the flatter the lump — exactly backwards for a bank of foam.
+  const short = Math.min(recipe.region.width, recipe.region.height);
+  // Amplitude and the pass offsets both push sideways from the centre, so they share
+  // one budget. Splitting it wrong makes the union of the runs stick out of the
+  // region, which the schema rejects and which would paint over a neighbour's marks.
+  const budget = short * 0.5 * 0.85;
+  const amplitude = ((recipe.amplitude ?? 0.4) / (0.4 + 0.55)) * budget * 0.9;
   const px = -dir.y;
   const py = dir.x;
+  // Passes stack across the short axis: vertically for a wide sky band, side to side
+  // for a tall one.
+  const across = recipe.region.width >= recipe.region.height ? { x: px, y: py } : { x: dir.x, y: dir.y };
 
-  const phase = rng.next() * Math.PI * 2;
-  const path: Path = [];
-  const steps = lobes * 6;
-  for (let i = 0; i <= steps; i += 1) {
-    const t = i / steps;
-    const offset = (t - 0.5) * length;
-    const envelope = Math.sin(Math.PI * t) ** 0.6;
-    const lobe = Math.sin(t * Math.PI * 2 * lobes + phase);
-    const second = Math.sin(t * Math.PI * 2 * lobes * 0.5 + phase * 1.7) * 0.4;
-    const displacement = (lobe + second) * amplitude * envelope;
-    path.push({
-      x: c.x + dir.x * offset + px * displacement,
-      y: c.y + dir.y * offset + py * displacement,
-    });
+  const paths: Path[] = [];
+  for (const offsetFraction of passOffsets(recipe.region, recipe.count ?? 3, rng)) {
+    const shift = offsetFraction * budget * 0.55;
+    // A different phase per pass, or every run undulates in step and the three
+    // together read as one thick wavy line again.
+    const phase = rng.next() * Math.PI * 2;
+    const runLength = length * rng.range(0.75, 1);
+    const steps = lobes * 6;
+
+    const path: Path = [];
+    for (let i = 0; i <= steps; i += 1) {
+      const t = i / steps;
+      const offset = (t - 0.5) * runLength;
+      const envelope = Math.sin(Math.PI * t) ** 0.6;
+      const lobe = Math.sin(t * Math.PI * 2 * lobes + phase);
+      const second = Math.sin(t * Math.PI * 2 * lobes * 0.5 + phase * 1.7) * 0.4;
+      const displacement = (lobe + second) * amplitude * envelope;
+      path.push({
+        x: c.x + dir.x * offset + px * displacement + across.x * shift,
+        y: c.y + dir.y * offset + py * displacement + across.y * shift,
+      });
+    }
+    paths.push(softenEnds(path, 0.08, rng));
   }
-  return [softenEnds(path, 0.08, rng)];
+  return paths;
 }
 
 /** Parallel lines at a given angle — the classical way to build a value. */
@@ -353,6 +373,38 @@ export function highlight(recipe: StrokeRecipe, rng: Rng): Path[] {
 }
 
 /**
+ * Offsets for a set of parallel passes across a region's short axis.
+ *
+ * A single swept path paints a *line*. Every recipe that says "lay in this field"
+ * — sky, water, a cloud, a bank of foam — needs the union of several paths to be a
+ * *shape*, and a line with soft ends reads as a capsule with a visible boundary
+ * rather than as a wash. That is what a stack of them looks like: the water in the
+ * first real render was four or five horizontal tubes, one per glaze, each with a
+ * rounded cap and its own value.
+ *
+ * Three passes is chosen against the cost. Fills dominate painting time — measured,
+ * not assumed (§4.4 of the painting notes) — and passes multiply stamps, so the
+ * useful range is narrow: two passes still read as one capsule because the second
+ * lands inside the first, and eight pass times the fills to buy nothing the eye can
+ * name. Three, offset across the region and jittered in length, is enough to break
+ * the silhouette without a cost the picture cannot justify.
+ *
+ * `count` on the recipe overrides, for a field that genuinely needs more.
+ */
+function passOffsets(region: NormalizedRect, count: number, rng: Rng): number[] {
+  const n = Math.max(2, Math.round(count));
+  if (n === 2) return [-0.3, 0.3];
+  const offsets: number[] = [];
+  for (let i = 0; i < n; i += 1) {
+    // Evenly across the region, then jittered so the passes do not stack into a
+    // regular ladder — which is the same defect one level up.
+    const even = n === 1 ? 0 : i / (n - 1) - 0.5;
+    offsets.push(even + rng.range(-0.08, 0.08));
+  }
+  return offsets;
+}
+
+/**
  * A broad, nearly transparent sweep across the whole region.
  *
  * Glazes are the trick that makes a synthetic painting stop looking synthetic:
@@ -368,16 +420,30 @@ export function glaze(recipe: StrokeRecipe, rng: Rng): Path[] {
   const py = dir.x;
   const drift = rng.range(-0.2, 0.2);
 
-  const path: Path = samples(20).map((t) => {
-    const offset = (t - 0.5) * length;
-    const bow = Math.sin(Math.PI * t) * amplitude;
-    const sweep = Math.sin(Math.PI * 2 * t + drift) * amplitude * 0.4;
-    return {
-      x: c.x + dir.x * offset + px * (bow + sweep),
-      y: c.y + dir.y * offset + py * (bow + sweep),
-    };
-  });
-  return [softenEnds(path, 0.05, rng)];
+  // Offset across the region's *short* axis, so a wide band gets its passes stacked
+  // vertically and a tall one gets them side to side. Using the long axis instead
+  // would put every pass on top of the first for a band that is wider than it is
+  // tall, which is most of them.
+  const across = recipe.region.width >= recipe.region.height ? { x: px, y: py } : { x: dir.x, y: dir.y };
+  const thickness = recipe.region.width >= recipe.region.height ? recipe.region.height : recipe.region.width;
+
+  const paths: Path[] = [];
+  for (const offsetFraction of passOffsets(recipe.region, recipe.count ?? 3, rng)) {
+    const shift = offsetFraction * thickness * 0.5 * 0.85;
+    // Lengths vary per pass so the ends do not align into a single rounded cap.
+    const passLength = length * rng.range(0.82, 1.05);
+    const path: Path = samples(20).map((t) => {
+      const offset = (t - 0.5) * passLength;
+      const bow = Math.sin(Math.PI * t) * amplitude;
+      const sweep = Math.sin(Math.PI * 2 * t + drift) * amplitude * 0.4;
+      return {
+        x: c.x + dir.x * offset + px * (bow + sweep) + across.x * shift,
+        y: c.y + dir.y * offset + py * (bow + sweep) + across.y * shift,
+      };
+    });
+    paths.push(softenEnds(path, 0.05, rng));
+  }
+  return paths;
 }
 
 /** Slides a point along a line crossing a region at a given fraction. */

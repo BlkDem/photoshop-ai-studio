@@ -371,3 +371,77 @@ describe('recipe energy reaches the brush', () => {
     expect(opacityAt(1)).toBeLessThanOrEqual(1);
   });
 });
+
+describe('a field primitive lays in a field, not a line', () => {
+  /**
+   * Both regressions here had the same shape: a primitive whose name promises a
+   * wash or a lump returned a single swept path, so every recipe that used it to
+   * cover an area painted a capsule with rounded ends instead. The first real
+   * Photoshop render was four or five horizontal tubes in the water — one per glaze
+   * — and a bank of foam that was a straight line, because `cloud` scaled its
+   * amplitude by the region's *height* and a shallow bank got almost no displacement.
+   */
+
+  it('lays a glaze down in more than one pass', () => {
+    const paths = pathsIn(glaze, { region: { x: 0, y: 0.3, width: 1, height: 0.12 } });
+    expect(paths.length).toBeGreaterThan(1);
+  });
+
+  it('offsets the passes so the union is not one capsule', () => {
+    const paths = pathsIn(glaze, { region: { x: 0, y: 0.3, width: 1, height: 0.12 } });
+    const middles = paths.map((p) => p[Math.floor(p.length / 2)]!.y);
+    expect(new Set(middles.map((y) => y.toFixed(4))).size).toBeGreaterThan(1);
+  });
+
+  it('varies glaze pass lengths so the ends do not align into one cap', () => {
+    const paths = pathsIn(glaze, { region: { x: 0, y: 0.3, width: 1, height: 0.12 } });
+    const extents = paths.map((p) => Math.max(...p.map((q) => q.x)) - Math.min(...p.map((q) => q.x)));
+    expect(new Set(extents.map((e) => e.toFixed(4))).size).toBeGreaterThan(1);
+  });
+
+  it('stacks the passes across the short axis, not the long one', () => {
+    // For a band wider than it is tall — nearly every region in a painting — putting
+    // the passes along the long axis would stack them all on top of the first.
+    const paths = pathsIn(glaze, { region: { x: 0, y: 0.3, width: 1, height: 0.12 } });
+    const spread = Math.max(...paths.map((p) => Math.max(...p.map((q) => q.y)))) -
+      Math.min(...paths.map((p) => Math.min(...p.map((q) => q.y))));
+    expect(spread).toBeGreaterThan(0.02);
+  });
+
+  it('gives a shallow foam bank real shape', () => {
+    // The regression itself: amplitude was proportional to region height, so a bank
+    // 0.03 tall got almost no displacement and came out as a straight horizontal
+    // tube rather than a lump of foam.
+    const region = { x: 0.1, y: 0.8, width: 0.5, height: 0.03 };
+    const paths = pathsIn(cloud, { region });
+    expect(paths.length).toBeGreaterThan(1);
+    const wiggle = Math.max(
+      ...paths.map((p) => Math.max(...p.map((q) => q.y)) - Math.min(...p.map((q) => q.y))),
+    );
+    expect(wiggle).toBeGreaterThan(region.height * 0.2);
+  });
+
+  it('gives a tall cloud more shape than a flat band, not less', () => {
+    const wiggle = (region: { x: number; y: number; width: number; height: number }) =>
+      Math.max(
+        ...pathsIn(cloud, { region }).map((p) => Math.max(...p.map((q) => q.y)) - Math.min(...p.map((q) => q.y))),
+      );
+    expect(wiggle({ x: 0.1, y: 0.1, width: 0.3, height: 0.5 })).toBeGreaterThan(
+      wiggle({ x: 0.1, y: 0.8, width: 0.5, height: 0.03 }),
+    );
+  });
+
+  it('keeps every pass inside the region', () => {
+    // The schema rejects an overhanging mark, and a mark outside its region paints
+    // over whatever is there.
+    const region = { x: 0.1, y: 0.8, width: 0.5, height: 0.03 };
+    for (const primitive of [glaze, cloud]) {
+      for (const path of pathsIn(primitive, { region })) {
+        for (const point of path) {
+          expect(point.y).toBeGreaterThan(region.y - 0.06);
+          expect(point.y).toBeLessThan(region.y + region.height + 0.06);
+        }
+      }
+    }
+  });
+});
