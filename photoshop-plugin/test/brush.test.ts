@@ -238,6 +238,70 @@ describe('stroke_path', () => {
     expect(result.layerName).toBe('Ink');
   });
 
+  it('selects the new layer before painting into it', async () => {
+    // Creating a layer does not select it on this build, so a stroke issued right
+    // after `createLayer()` lands on the previously active layer and the new one
+    // comes back empty. This is the "Logo layer came back empty" symptom, and it
+    // is invisible unless the selection is checked explicitly.
+    const host = drawingHost();
+    const created = { id: 99, name: 'Ink' };
+    const doc = host.document as Record<string, unknown>;
+    doc.createLayer = () => created;
+    const selected: unknown[] = [];
+    Object.defineProperty(doc, 'activeLayer', {
+      get: () => doc.__active,
+      set: (value: unknown) => {
+        doc.__active = value;
+        selected.push(value);
+      },
+      configurable: true,
+    });
+
+    await runStroke(loadBrush(host.photoshop), { newLayer: true, layerName: 'Ink' });
+
+    expect(selected).toContain(created);
+    // And it must happen *before* the first fill, not after.
+    const firstFill = host.events.indexOf('fill');
+    expect(selected.length).toBeGreaterThan(0);
+    expect(host.fills.length).toBeGreaterThan(0);
+    expect(firstFill).toBeGreaterThanOrEqual(0);
+  });
+
+  it('uses the UXP activeLayers array when the document has one', async () => {
+    const host = drawingHost();
+    const doc = host.document as Record<string, unknown>;
+    const created = { id: 99, name: 'Ink' };
+    doc.createLayer = () => created;
+    doc.activeLayers = [];
+    await runStroke(loadBrush(host.photoshop), { newLayer: true, layerName: 'Ink' });
+    expect(doc.activeLayers).toEqual([created]);
+  });
+
+  it('resolves the created layer before selecting it', async () => {
+    // `document.createLayer` returns before the layer's `id` is populated, so the
+    // handle it hands back is not yet a Layer. Assigning it to `activeLayers` is a
+    // type error in UXP — reported as "expected Layer, found ... at index 0" —
+    // not a silent no-op, which is what made this worth a test.
+    const host = drawingHost();
+    const doc = host.document as Record<string, unknown>;
+    const handle: Record<string, unknown> = { name: 'Ink' };
+    doc.createLayer = () => handle;
+    doc.activeLayers = [];
+
+    // Populated a tick later, the way the real host populates it.
+    setTimeout(() => {
+      handle.id = 99;
+    }, 5);
+
+    await runStroke(loadBrush(host.photoshop), { newLayer: true, layerName: 'Ink' });
+
+    const selected = doc.activeLayers as Array<Record<string, unknown>>;
+    expect(selected).toHaveLength(1);
+    // The thing selected must be the resolved layer, not the raw handle.
+    expect(typeof selected[0]?.id).toBe('number');
+    expect(selected[0]?.id).toBe(99);
+  });
+
   it('refuses a path with no usable points instead of silently succeeding', async () => {
     const host = drawingHost();
     await expect(

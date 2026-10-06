@@ -134,6 +134,21 @@ describe('operation registry', () => {
     }
   });
 
+  it('offers every shared paint parameter on both stroke operations', () => {
+    // `stroke_path` and `paint_stroke` share a base, and the painting engine drives
+    // `paint_stroke` because it emits point lists. A parameter added to only one of
+    // them is *stripped* by zod rather than rejected, so the call still succeeds and
+    // the feature is silently absent — which is how `tip` reached the plugin as
+    // `tip: null` on every real painting stroke, with nothing failing.
+    const sharedKeys = ['tip', 'spacing', 'newLayer', 'layerName', 'blendMode', 'opacity', 'brushSize'];
+    for (const op of ['stroke_path', 'paint_stroke'] as const) {
+      const shape = (OPERATIONS[op].params as unknown as { shape: Record<string, unknown> }).shape;
+      for (const key of sharedKeys) {
+        expect(Object.keys(shape), `${op} is missing "${key}"`).toContain(key);
+      }
+    }
+  });
+
   it('never exposes a batchPlay / escape-hatch tool', () => {
     for (const name of TOOL_NAME_LIST) {
       expect(name).not.toMatch(/batch|execute|script|eval|raw|shell|command/i);

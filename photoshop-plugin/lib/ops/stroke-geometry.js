@@ -235,9 +235,106 @@ function pressureAt(t) {
   return Math.sin(Math.PI * Math.max(0, Math.min(1, t)));
 }
 
-/** How far apart to place discs of the given radius so none of them separate. */
+/** How far apart to place discs of the given radius so none of they separate. */
 function stampSpacing(radius) {
   return Math.max(0.35, Math.min(radius, radius * 0.4));
+}
+
+/**
+ * Stamp spacing honouring a caller-supplied density, as a fraction of the radius.
+ *
+ * `stampSpacing` above is the historical rule and stays as the default, so every
+ * stroke that did not ask for a spacing rasterizes byte-identically to before.
+ * The fraction is honoured all the way to 1 — discs one radius apart still
+ * overlap out to 2r, so the mark stays continuous however coarse it gets.
+ */
+function stampSpacingAt(radius, fraction) {
+  var f = typeof fraction === 'number' ? Math.max(0.05, Math.min(1, fraction)) : 0.4;
+  return Math.max(0.35, radius * f);
+}
+
+/**
+ * The ring stack for a synthesized tip, **largest first**.
+ *
+ * Order is the whole trick. Painting the broad faint ring first and the dense
+ * core last is what leaves the middle of a mark opaque while its rim stays soft;
+ * the other order lets the wash dominate and every mark comes out flat.
+ *
+ * The profile is two-segment — opaque out to `core` of the radius, then a linear
+ * fade to `outerAlpha` at the rim. A real brush tip is closer to a power curve,
+ * but a linear fade is what a handful of discs can represent without the rim
+ * banding visibly.
+ *
+ * `steps` of 1 returns exactly one full-alpha disc, which is what the un-tipped
+ * rasterizer has always drawn.
+ */
+function tipRings(radius, tip) {
+  var r = Math.max(0.5, radius);
+  var model = tip || { core: 1, steps: 1, outerAlpha: 1 };
+  var steps = Math.max(1, Math.min(8, Math.round(model.steps || 1)));
+  if (steps === 1) return [{ radius: r, weight: 1 }];
+
+  var core = Math.max(0.05, Math.min(1, model.core));
+  var outerAlpha = Math.max(0, Math.min(1, model.outerAlpha));
+  var rings = [];
+
+  // The rings span from the rim *in to the core boundary*, not evenly from the
+  // centre out. Spacing them evenly makes `core: 0.55` produce an opaque disc of
+  // only 1/steps of the radius and a faint halo filling the rest — which reads as
+  // a donut rather than a soft brush, because the solid middle is tiny.
+  for (var index = 0; index < steps; index += 1) {
+    var t = index / (steps - 1); // 0 at the rim, 1 at the core
+    var radiusFraction = 1 - (1 - core) * t;
+    // Faint at the rim, opaque at the core: `1 - t` carries the falloff.
+    rings.push({ radius: r * radiusFraction, weight: outerAlpha + (1 - outerAlpha) * t });
+  }
+  return rings;
+}
+
+/**
+ * How many discs land on any one pixel along a stroke.
+ *
+ * Solves the problem a swept stroke always has: N overlapping fills at alpha `a`
+ * reach `1-(1-a)^N`, so a translucent stroke needs each individual fill lighter
+ * than the stroke, or it comes out solid. With a multi-ring tip the rings stack on
+ * each other too, so `steps` multiplies the divisor.
+ */
+function overlapDivisor(radius, spacing, steps) {
+  var step = stampSpacingAt(radius, spacing);
+  return Math.min(Math.max(1, (2 * Math.max(0.5, radius)) / step), 24) * Math.max(1, steps || 1);
+}
+
+/**
+ * The smallest alpha a single fill may be asked for, as a fraction.
+ *
+ * Without a floor the overlap compensation walks the per-fill alpha toward zero as
+ * spacing gets denser, and Photoshop stops depositing ink well before that: a fill
+ * asked at ~2.4% laid down nothing, so a stroke at `spacing: 0.12` completed every
+ * one of its 688 fills and verified as "no sampled pixel changed". The stroke
+ * verification caught it, which is the system working, but the engine should not
+ * be able to request an invisible fill in the first place.
+ *
+ * The exact threshold Photoshop applies is not measured — it sits between the
+ * 2.4% that failed and the 7.7% that worked — so this is a deliberately
+ * conservative floor, not a characterised limit. Denser spacing still raises the
+ * composite toward the requested opacity; it just stops asking for less than
+ * Photoshop will honour.
+ */
+var MIN_FILL_ALPHA = 0.025;
+
+/** The alpha a single ring fill needs to land the stroke at the requested opacity. */
+function ringFillAlpha(opacity, radius, spacing, steps, weight) {
+  var requested = Math.max(0, Math.min(1, opacity));
+  if (requested <= 0) return 0;
+  if (requested >= 1) return 1;
+  var divisor = overlapDivisor(radius, spacing, steps);
+  // The floor is applied to the *base* alpha, before the ring's weight — not to the
+  // product. Flooring the product clamps the faint rim to the same value as the
+  // opaque core and the soft edge collapses into a flat disc, which defeats the
+  // whole point of a tip. Flooring the base guarantees the stroke deposits ink;
+  // the weight still shapes the edge.
+  var base = Math.max(MIN_FILL_ALPHA, 1 - Math.pow(1 - requested, 1 / divisor));
+  return Math.max(0, Math.min(1, base * (weight === undefined ? 1 : weight)));
 }
 
 /**
@@ -255,6 +352,7 @@ function eachStamp(points, starts, options, onStamp) {
   var radius = Math.max(0.5, options.radius || 1);
   var simulatePressure = options.simulatePressure === true;
   var maxStamps = options.maxStamps || 4000;
+  var spacingFraction = options.spacing;
   var emitted = 0;
   var aborted = false;
 
@@ -304,7 +402,7 @@ function eachStamp(points, starts, options, onStamp) {
         // the disc shrank, which is exactly how a tapered end ends up dotted.
         var pressure = simulatePressure ? pressureAt((segmentStart + 0) / length) : 1;
         if (pressure < 0.02) pressure = 0.02;
-        var step = stampSpacing(radius * pressure);
+        var step = stampSpacingAt(radius * pressure, spacingFraction);
 
         var remaining = segLength - (walked - segmentStart);
         if (remaining <= 1e-9) break;
@@ -396,6 +494,7 @@ function buildStroke(segments, points, options) {
       radius: radius,
       simulatePressure: settings.simulatePressure === true,
       maxStamps: settings.maxStamps || 4000,
+      spacing: settings.spacing,
     },
     function (stamp) {
       stamps.push(stamp);
@@ -422,5 +521,10 @@ module.exports = {
   buildStroke: buildStroke,
   pressureAt: pressureAt,
   stampSpacing: stampSpacing,
+  stampSpacingAt: stampSpacingAt,
+  tipRings: tipRings,
+  overlapDivisor: overlapDivisor,
+  ringFillAlpha: ringFillAlpha,
+  MIN_FILL_ALPHA: MIN_FILL_ALPHA,
   distance: distance,
 };

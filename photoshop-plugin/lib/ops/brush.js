@@ -19,10 +19,12 @@
  *     that a modal scope cannot dismiss.
  *   - `action.batchPlay` with `_obj: 'paint'` is rejected as "command unavailable".
  *
- * ExtendScript's `PathItem.stroke(brush, color, …)` — which *is* a real brush,
- * real tip, real pressure — only exists in the route above, so from inside the
- * plugin it is out of reach. (It does work from a `.jsx` file driven over COM;
- * `scripts/brush-firework.jsx` is that path, kept as a diagnostic.)
+ * The COM/ExtendScript door is shut as well. Driven over COM on this same build,
+ * `typeof app.brushes` and `typeof app.activeBrush` both return `undefined`, so
+ * there is no Brush object to hand to `PathItem.stroke()` and the call cannot be
+ * made. `scripts/brush-firework.jsx` was written on the belief that this route
+ * worked; run, it reports `brushUsed=false; bursts=-1` and fails on exactly that
+ * property. It is kept only as a reproduction of the failure.
  *
  * So a stroke here is **rasterized, not simulated through the brush engine**:
  * the path is flattened to a polyline, swept with overlapping discs of the
@@ -32,6 +34,11 @@
  * brush tip texture, no spacing dynamics and no flow simulation. `methodUsed` in
  * the result says so, and the shared tool description says so too, because a
  * description that overclaims is how a caller ends up surprised.
+ *
+ * Soft edges are therefore *geometry*, not a host feature: the paint engine
+ * (`@photoshop-ai-studio/paint-engine`) builds a falloff out of concentric discs
+ * and paints them largest-first. That is a synthesized tip, and it is labelled as
+ * one everywhere it surfaces.
  *
  * ## Why the result is verified rather than trusted
  *
@@ -79,70 +86,13 @@ function selectionType() {
 /**
  * Fills the current selection with the foreground colour.
  *
- * The four descriptor spellings are ordered by how much of the stroke they can
- * honour: the first can carry a blend mode and an opacity, and the later ones
- * are progressively plainer fallbacks for builds that reject the richer form.
- * The `_obj: 'stroke'` descriptor is deliberately absent — it hangs.
+ * Delegates to `ps.fillSelection`. The descriptor ladder lives there now because
+ * it is the only route this host has for putting colour into pixels, and a
+ * second private copy in this module is how `lib/demo.js` ended up using a
+ * descriptor documented to hang instead.
  */
 function fillSelection(opacity, blendMode) {
-  var mode = { _enum: 'blendMode', _value: blendMode || 'normal' };
-  var percent = { _unit: 'percentUnit', _value: opacity };
-
-  var attempts = [
-    [{
-      _obj: 'fill',
-      using: { _enum: 'fill', _value: 'foregroundColor' },
-      mode: mode,
-      opacity: percent,
-      _options: { dialogOptions: 'dontDisplay' },
-    }],
-    [{
-      _obj: 'fill',
-      _target: [{ _ref: 'document', _enum: 'ordinal', _value: 'targetEnum' }],
-      using: { _enum: 'fill', _value: 'foregroundColor' },
-      mode: mode,
-      opacity: percent,
-      _options: { dialogOptions: 'dontDisplay' },
-    }],
-    [{
-      _obj: 'fill',
-      _target: [{ _ref: 'document', _enum: 'ordinal', _value: 'targetEnum' }],
-      using: { _enum: 'fill', _value: 'foregroundColor' },
-      opacity: percent,
-      _options: { dialogOptions: 'dontDisplay' },
-    }],
-    [{
-      _obj: 'fill',
-      _target: [{ _ref: 'layer', _enum: 'ordinal', _value: 'targetEnum' }],
-      using: { _enum: 'fill', _value: 'foregroundColor' },
-      _options: { dialogOptions: 'dontDisplay' },
-    }],
-  ];
-
-  function tryNext(index) {
-    if (index >= attempts.length) {
-      return Promise.reject(
-        StudioError('STEP_FAILED', 'Photoshop rejected every fill descriptor this build accepts.', {
-          recoverable: true,
-          details: { attempts: attempts.length },
-        }),
-      );
-    }
-    return ps.batchPlay(attempts[index], { timeoutMs: 5000 }).then(
-      function (result) {
-        return { succeeded: true, attempt: index + 1, result: result };
-      },
-      function (err) {
-        Logger.info('fill: descriptor ' + (index + 1) + ' rejected', {
-          code: (err && err.code) || 'UNKNOWN',
-          message: (err && err.message) || String(err),
-        });
-        return tryNext(index + 1);
-      },
-    );
-  }
-
-  return tryNext(0);
+  return ps.fillSelection(opacity, blendMode);
 }
 
 function docInfo(doc) {
@@ -256,8 +206,14 @@ function sameColor(a, b, tolerance) {
  *
  * The order matters: the "before" read has to happen before the first fill, or
  * there is nothing to compare against and the check becomes decorative.
+ *
+ * `tip` is a synthesized brush edge — see `stroke-geometry.js: tipRings`. When it
+ * is absent or a single step, each stamp is one flat disc filled at the alpha
+ * `opacity`, which is exactly what this function always did. When the caller asks
+ * for a tip with more steps, each stamp becomes a stack of concentric discs
+ * filled largest-first at descending alpha.
  */
-function rasterizeAndVerify(doc, selection, stroke, opacity, blendMode) {
+function rasterizeAndVerify(doc, selection, stroke, opacity, blendMode, tip, spacing) {
   var points = stroke.verificationPoints;
 
   return readSamples(doc, points).then(function (before) {
@@ -293,27 +249,53 @@ function rasterizeAndVerify(doc, selection, stroke, opacity, blendMode) {
   });
 
   /**
-   * Fills each disc in turn.
+   * Fills each disc in turn, ring by ring.
    *
    * Sequential on purpose: `batchPlay` descriptors that overlap would composite
    * against each other inside one action-manager pass, and how stacked fills
    * behave is not stable across builds.
+   *
+   * A flat stroke keeps the historical single-fill path exactly, including its
+   * `strokeAlpha` compensation, because that compensation was measured against
+   * Photoshop for an overlap count derived from the stamp total. The multi-ring
+   * path uses `ringFillAlpha` instead, which models the ring stack as part of the
+   * overlap rather than pretending it is not there.
    */
   function paintStamps(index) {
     if (index >= stroke.stamps.length) return Promise.resolve(0);
 
-    var bounds = ellipseBounds(stroke.stamps[index], doc);
-    if (!bounds) return paintStamps(index + 1);
+    var stamp = stroke.stamps[index];
+    var rings = geometry.tipRings(stamp.r, tip);
+    var flat = rings.length === 1;
 
-    return Promise.resolve(selection.selectEllipse(bounds, selectionType()))
-      .then(function () {
-        return fillSelection(opacity, blendMode);
-      })
-      .then(function () {
-        return paintStamps(index + 1).then(function (painted) {
-          return painted + 1;
-        });
+    return paintRing(0).then(function (painted) {
+      return paintStamps(index + 1).then(function (rest) {
+        return painted + rest;
       });
+    });
+
+    function paintRing(ringIndex) {
+      if (ringIndex >= rings.length) return Promise.resolve(0);
+      var ring = rings[ringIndex];
+      var bounds = ellipseBounds({ x: stamp.x, y: stamp.y, r: ring.radius }, doc);
+      if (!bounds) return paintRing(ringIndex + 1);
+
+      // `ringFillAlpha` floors its own base alpha, so a dense stroke still deposits
+      // ink — see MIN_FILL_ALPHA in stroke-geometry.js.
+      var alpha = flat
+        ? opacity
+        : geometry.ringFillAlpha(opacity / 100, stamp.r, spacing, rings.length, ring.weight) * 100;
+
+      return Promise.resolve(selection.selectEllipse(bounds, selectionType()))
+        .then(function () {
+          return fillSelection(alpha, blendMode);
+        })
+        .then(function () {
+          return paintRing(ringIndex + 1).then(function (painted) {
+            return painted + 1;
+          });
+        });
+    }
   }
 }
 
@@ -448,6 +430,7 @@ function drawStroke(ctx, geometryInput) {
     smoothing: params.smoothing,
     simulatePressure: params.simulatePressure === true,
     maxStamps: MAX_STAMPS,
+    spacing: params.spacing,
   });
 
   if (stroke.stamps.length === 0) {
@@ -458,6 +441,12 @@ function drawStroke(ctx, geometryInput) {
       }),
     );
   }
+
+  // Resolved before the modal scope, and deliberately: `var` is function-scoped, so
+  // declaring it further down hoisted it past the log line and every run reported
+  // `tipSteps: 1` no matter what it painted. A log that is always wrong is worse
+  // than no log — it says the feature is off while it is on.
+  var tip = params.tip && typeof params.tip === 'object' ? params.tip : null;
 
   return ps.withForegroundColor(color, function () {
     var doc = ps.resolveDocument(params.documentId);
@@ -470,55 +459,75 @@ function drawStroke(ctx, geometryInput) {
       );
     }
 
-    var target = params.newLayer === true ? createStrokeLayer(doc, params.layerName) : null;
-    if (target && target.error) return Promise.reject(target.error);
+    // `createStrokeLayer` is asynchronous because selecting the new layer is, and
+    // it must be awaited before anything paints: a stroke issued before the
+    // selection lands goes to the previously active layer.
+    var targetPromise =
+      params.newLayer === true
+        ? createStrokeLayer(doc, params.layerName).then(function (target) {
+            if (target && target.error) throw target.error;
+            return target;
+          })
+        : Promise.resolve(null);
 
-    Logger.info('rasterizing stroke', {
-      op: ctx.op,
-      stamps: stroke.stamps.length,
-      points: stroke.points.length,
-      brushSize: brushSize,
-      blendMode: blendMode,
-      simulatePressure: params.simulatePressure === true,
-      newLayer: params.newLayer === true,
-    });
-
-    // `opacity` is the opacity of the stroke; the discs that make it up get the
-    // alpha that adds up to it.
-    return rasterizeAndVerify(doc, selection, stroke, strokeAlpha(opacity, stroke.radius, stroke.stamps.length), blendMode)
-      .then(function (proof) {
-        var info = target ? { layerId: target.id, layerName: target.name } : docInfo(doc);
-
-        if (proof.readable > 0 && proof.changed === 0) {
-          throw StudioError(
-            'STEP_FAILED',
-            'The stroke was filled but no sampled pixel along the path changed. ' +
-              'The path is probably already the colour being painted, or the target layer is hidden.',
-            { recoverable: false, details: { samples: proof.samples, painted: proof.painted } },
-          );
-        }
-
-        return {
-          success: true,
-          layerId: info.layerId,
-          layerName: info.layerName,
-          brushSize: brushSize,
-          blendMode: blendMode,
-          methodUsed: 'rasterized-stroke',
-          stampsPainted: proof.painted,
-          samplesChecked: proof.readable,
-          samplesChanged: proof.changed,
-          verified: proof.readable === 0 ? null : proof.changed > 0,
-          truncated: stroke.truncated,
-        };
-      })
-      .catch(function (err) {
-        if (StudioError.isStudioError(err)) throw err;
-        throw StudioError('STEP_FAILED', 'Failed to draw stroke: ' + ((err && err.message) || String(err)), {
-          recoverable: true,
-          details: { brushSize: brushSize, stamps: stroke.stamps.length },
-        });
+    return targetPromise.then(function (target) {
+      Logger.info('rasterizing stroke', {
+        op: ctx.op,
+        stamps: stroke.stamps.length,
+        points: stroke.points.length,
+        brushSize: brushSize,
+        blendMode: blendMode,
+        simulatePressure: params.simulatePressure === true,
+        newLayer: params.newLayer === true,
+        tipSteps: tip ? tip.steps : 1,
+        spacing: params.spacing === undefined ? 'default' : params.spacing,
       });
+
+      // `opacity` is the opacity of the stroke; the discs that make it up get the
+      // alpha that adds up to it. A flat stroke keeps the measured `strokeAlpha`
+      // compensation; a tipped stroke recomputes per ring, because the ring stack is
+      // part of the overlap and pretending otherwise lands it opaque.
+      var flatOpacity = strokeAlpha(opacity, stroke.radius, stroke.stamps.length);
+      return rasterizeAndVerify(doc, selection, stroke, flatOpacity, blendMode, tip, params.spacing)
+        .then(function (proof) {
+          var info = target ? { layerId: target.id, layerName: target.name } : docInfo(doc);
+
+          if (proof.readable > 0 && proof.changed === 0) {
+            throw StudioError(
+              'STEP_FAILED',
+              'The stroke was filled but no sampled pixel along the path changed. ' +
+                'The path is probably already the colour being painted, or the target layer is hidden.',
+              { recoverable: false, details: { samples: proof.samples, painted: proof.painted } },
+            );
+          }
+
+          return {
+            success: true,
+            layerId: info.layerId,
+            layerName: info.layerName,
+            brushSize: brushSize,
+            blendMode: blendMode,
+            methodUsed: tip ? 'rasterized-stroke-synthesized-tip' : 'rasterized-stroke',
+            stampsPainted: proof.painted,
+            samplesChecked: proof.readable,
+            samplesChanged: proof.changed,
+            verified: proof.readable === 0 ? null : proof.changed > 0,
+            truncated: stroke.truncated,
+            // The tip is echoed back so a caller can never mistake a synthesized
+            // soft edge for a Photoshop brush preset. `tipIsSynthesized` is
+            // unconditionally true: there is no other kind of tip this host can do.
+            tip: tip ? { core: tip.core, steps: tip.steps, outerAlpha: tip.outerAlpha } : null,
+            tipIsSynthesized: tip ? true : null,
+          };
+        })
+        .catch(function (err) {
+          if (StudioError.isStudioError(err)) throw err;
+          throw StudioError('STEP_FAILED', 'Failed to draw stroke: ' + ((err && err.message) || String(err)), {
+            recoverable: true,
+            details: { brushSize: brushSize, stamps: stroke.stamps.length },
+          });
+        });
+    });
   });
 }
 
@@ -536,18 +545,34 @@ function createStrokeLayer(doc, requestedName) {
   // constant is duplicated here and the post-condition check depends on both
   // copies agreeing.
   var name = requestedName || 'Stroke';
+  var created;
   try {
-    var layer = doc.createLayer({ name: name });
-    return { id: layer.id, name: layer.name };
+    created = doc.createLayer({ name: name });
   } catch (err) {
     Logger.warn('createStrokeLayer: layers.add failed', { message: (err && err.message) || String(err) });
-    return {
+    return Promise.resolve({
       error: StudioError('STEP_FAILED', 'Could not create the layer for this stroke: ' + ((err && err.message) || String(err)), {
         recoverable: true,
         details: { layerName: name },
       }),
-    };
+    });
   }
+
+  // Two things, in this order, and both matter.
+  //
+  // 1. **Resolve first.** `createLayer` hands back a handle before the layer is
+  //    fully formed — its `id` is not populated yet. Assigning that handle to
+  //    `document.activeLayers` is a type error in UXP ("expected Layer"), because
+  //    it is not one yet. `ps.resolveCreatedLayer` is what the rest of the plugin
+  //    uses for exactly this.
+  // 2. **Then select.** Creating a layer does not select it on this build, so a
+  //    stroke issued before this lands on the previously active layer and the new
+  //    one comes back empty.
+  return ps.resolveCreatedLayer(doc, created).then(function (layer) {
+    return Promise.resolve(ps.selectLayer(layer)).then(function () {
+      return { id: layer.id, name: layer.name };
+    });
+  });
 }
 
 /** `stroke_path` — a path of segments, with Bézier curves honoured. */

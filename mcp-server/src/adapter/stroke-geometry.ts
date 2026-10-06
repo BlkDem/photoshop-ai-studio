@@ -208,6 +208,18 @@ function pressureAt(t: number): number {
   return Math.sin(Math.PI * Math.max(0, Math.min(1, t)));
 }
 
+/**
+ * Disc spacing honouring an explicit density, as a fraction of the radius.
+ *
+ * Mirrors `stamp-geometry.js: stampSpacingAt` in the plugin. Omitting `fraction`
+ * keeps the historical rule, which is what lets the differential test compare a
+ * plain stroke byte-for-byte across the two implementations.
+ */
+function stampSpacingAt(radius: number, fraction: number | undefined): number {
+  const f = typeof fraction === 'number' ? Math.max(0.05, Math.min(1, fraction)) : 0.4;
+  return Math.max(0.35, Math.max(0.5, radius) * f);
+}
+
 /** Disc spacing for a given radius, so neighbouring discs always overlap. */
 function stampSpacing(radius: number): number {
   return Math.max(0.35, Math.min(radius, radius * 0.4));
@@ -226,6 +238,7 @@ function rasterizeStamps(
   smoothing: number,
   simulatePressure: boolean,
   maxStamps: number,
+  spacing?: number,
 ): Array<{ x: number; y: number; r: number }> {
   const smoothed = dropDuplicatePoints(smoothPoints(path, smoothingIterations(smoothing)), 0.01);
   const stamps: Array<{ x: number; y: number; r: number }> = [];
@@ -264,7 +277,7 @@ function rasterizeStamps(
       for (;;) {
         let pressure = simulatePressure ? pressureAt(segmentStart / length) : 1;
         if (pressure < 0.02) pressure = 0.02;
-        const step = stampSpacing(baseRadius * pressure);
+        const step = stampSpacingAt(baseRadius * pressure, spacing);
 
         const remaining = segLength - (walked - segmentStart);
         if (remaining <= 1e-9) break;
@@ -288,4 +301,75 @@ function rasterizeStamps(
 
 
 export type { FlatPath, Segment };
-export { flattenSegments, flattenCubic, smoothingIterations, smoothPoints, dropDuplicatePoints, pressureAt, stampSpacing, rasterizeStamps };
+/**
+ * The ring stack for a synthesized tip, largest first, and the alpha each ring
+ * needs.
+ *
+ * A mirror of `stroke-geometry.js: tipRings` / `ringFillAlpha` in the plugin. The
+ * preview this feeds is what Studio shows while a painting is in progress, so if
+ * the two disagree the picture the user watches is not the picture they get.
+ */
+interface TipModel {
+  core: number;
+  steps: number;
+  outerAlpha: number;
+}
+
+function tipRings(radius: number, tip?: TipModel | null): Array<{ radius: number; weight: number }> {
+  const r = Math.max(0.5, radius);
+  const model = tip ?? { core: 1, steps: 1, outerAlpha: 1 };
+  const steps = Math.max(1, Math.min(8, Math.round(model.steps || 1)));
+  if (steps === 1) return [{ radius: r, weight: 1 }];
+
+  const core = Math.max(0.05, Math.min(1, model.core));
+  const outerAlpha = Math.max(0, Math.min(1, model.outerAlpha));
+  const rings: Array<{ radius: number; weight: number }> = [];
+
+  // Rings span rim -> core boundary, so `core` really is the opaque fraction.
+  for (let index = 0; index < steps; index += 1) {
+    const t = index / (steps - 1);
+    rings.push({ radius: r * (1 - (1 - core) * t), weight: outerAlpha + (1 - outerAlpha) * t });
+  }
+  return rings;
+}
+
+function overlapDivisor(radius: number, spacing: number | undefined, steps: number): number {
+  const step = stampSpacingAt(radius, spacing);
+  return Math.min(Math.max(1, (2 * Math.max(0.5, radius)) / step), 24) * Math.max(1, steps);
+}
+
+/** Mirrors `MIN_FILL_ALPHA` in the plugin. See the note there for why it exists. */
+const MIN_FILL_ALPHA = 0.025;
+
+function ringFillAlpha(
+  opacity: number,
+  radius: number,
+  spacing: number | undefined,
+  steps: number,
+  weight: number,
+): number {
+  const requested = Math.max(0, Math.min(1, opacity));
+  if (requested <= 0) return 0;
+  if (requested >= 1) return 1;
+  // Floored before the weight, so a dense stroke still deposits ink without the
+  // faint rim being clamped up to the core's alpha. Mirrors the plugin.
+  const base = Math.max(MIN_FILL_ALPHA, 1 - Math.pow(1 - requested, 1 / overlapDivisor(radius, spacing, steps)));
+  return Math.max(0, Math.min(1, base * weight));
+}
+
+export {
+  flattenSegments,
+  flattenCubic,
+  smoothingIterations,
+  smoothPoints,
+  dropDuplicatePoints,
+  pressureAt,
+  stampSpacing,
+  stampSpacingAt,
+  tipRings,
+  overlapDivisor,
+  ringFillAlpha,
+  MIN_FILL_ALPHA,
+  rasterizeStamps,
+};
+export type { TipModel };

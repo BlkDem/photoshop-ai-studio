@@ -3,12 +3,15 @@ import { describe, expect, it } from 'vitest';
 import { loadPluginFile } from '../../photoshop-plugin/test/harness.js';
 import {
   flattenSegments,
+  overlapDivisor,
   rasterizeStamps,
+  ringFillAlpha,
   smoothingIterations,
   smoothPoints,
   dropDuplicatePoints,
   pressureAt,
   stampSpacing,
+  tipRings,
   type FlatPath,
   type Segment,
 } from '../src/adapter/stroke-geometry.js';
@@ -31,9 +34,29 @@ const plugin = loadPluginFile('lib/ops/stroke-geometry.js') as unknown as {
   buildStroke(
     segments?: Segment[],
     points?: Array<{ x: number; y: number }>,
-    options?: { brushSize?: number; smoothing?: number; simulatePressure?: boolean; maxStamps?: number },
+    options?: {
+      brushSize?: number;
+      smoothing?: number;
+      simulatePressure?: boolean;
+      maxStamps?: number;
+      spacing?: number;
+    },
   ): { points: Array<{ x: number; y: number }>; starts: number[]; stamps: Array<{ x: number; y: number; r: number }> };
 };
+
+const pluginGeometry = loadPluginFile('lib/ops/stroke-geometry.js') as unknown as {
+  tipRings(radius: number, tip: unknown): Array<{ radius: number; weight: number }>;
+  overlapDivisor(radius: number, spacing: number, steps: number): number;
+  ringFillAlpha(opacity: number, radius: number, spacing: number, steps: number, weight: number): number;
+};
+
+/**
+ * Normalises a stamp list for comparison: drops the plugin's extra pressure
+ * field and rounds, because the two implementations accumulate the walking
+ * distance in a different order and land a float's last bit apart.
+ */
+const geometry = (stamps: Array<{ x: number; y: number; r: number }>) =>
+  stamps.map(({ x, y, r }) => ({ x: round(x), y: round(y), r: round(r) }));
 
 interface Case {
   name: string;
@@ -367,6 +390,104 @@ describe('shared helpers', () => {
     for (const radius of [0.5, 1, 3, 20, 400]) {
       expect(stampSpacing(radius)).toBeLessThanOrEqual(radius);
       expect(stampSpacing(radius)).toBeGreaterThan(0);
+    }
+  });
+});
+
+/**
+ * Tips and spacing: the same agreement test, extended.
+ *
+ * The soft edge is the one place the mock and the plugin can visibly disagree —
+ * the mock is where a painting is rehearsed and previewed, so a ring stack that
+ * drifts between the two implementations means the user watches a picture that
+ * is not the one they get. Both implementations are compared here rather than
+ * trusted.
+ */
+const TIP_CASES = [
+  { name: 'flat', tip: { core: 1, steps: 1, outerAlpha: 1 } },
+  { name: 'soft', tip: { core: 0.18, steps: 4, outerAlpha: 0.18 } },
+  { name: 'dry', tip: { core: 0.34, steps: 4, outerAlpha: 0.12 } },
+  { name: 'glaze', tip: { core: 0.12, steps: 4, outerAlpha: 0.1 } },
+  { name: 'no tip', tip: undefined },
+];
+
+describe('plugin and mock agree on spacing', () => {
+  it('produces identical stamps for every density', () => {
+    const path: FlatPath = {
+      points: [
+        { x: 10, y: 10 },
+        { x: 120, y: 60 },
+        { x: 260, y: 40 },
+      ],
+      starts: [0],
+    };
+
+    for (const spacing of [0.1, 0.2, 0.28, 0.4, 0.7, 1]) {
+      const fromMock = rasterizeStamps(path, 12, 0, false, 4000, spacing);
+      const fromPlugin = plugin.buildStroke(undefined, path.points, {
+        brushSize: 24,
+        maxStamps: 4000,
+        spacing,
+      }).stamps;
+      // Normalised to x/y/r: the plugin also carries a `p` pressure field the
+      // mock does not, which is a shape difference rather than a disagreement.
+      expect(geometry(fromPlugin)).toEqual(geometry(fromMock));
+    }
+  });
+
+  it('leaves stamps untouched when no density is given', () => {
+    const path: FlatPath = {
+      points: [
+        { x: 0, y: 0 },
+        { x: 200, y: 0 },
+      ],
+      starts: [0],
+    };
+    expect(geometry(plugin.buildStroke(undefined, path.points, { brushSize: 16 }).stamps)).toEqual(
+      geometry(rasterizeStamps(path, 8, 0, false, 4000)),
+    );
+  });
+});
+
+describe('plugin and mock agree on tips', () => {
+  it('builds the same ring stack', () => {
+    for (const { name, tip } of TIP_CASES) {
+      const fromMock = tipRings(50, tip ?? null);
+      const fromPlugin = pluginGeometry.tipRings(50, tip ?? null);
+      expect(fromPlugin, name).toEqual(fromMock);
+    }
+  });
+
+  it('orders rings largest first in both', () => {
+    for (const { name, tip } of TIP_CASES) {
+      const rings = tipRings(50, tip ?? null);
+      for (let i = 1; i < rings.length; i += 1) {
+        expect(rings[i]!.radius, name).toBeLessThanOrEqual(rings[i - 1]!.radius);
+      }
+    }
+  });
+
+  it('computes the same ring alpha', () => {
+    for (const { name, tip } of TIP_CASES) {
+      const steps = tip?.steps ?? 1;
+      for (const weight of [1, 0.5, 0.15]) {
+        for (const opacity of [0.25, 0.6, 1]) {
+          const fromMock = ringFillAlpha(opacity, 50, 0.3, steps, weight);
+          const fromPlugin = pluginGeometry.ringFillAlpha(opacity, 50, 0.3, steps, weight);
+          expect(fromPlugin, `${name} w=${weight} o=${opacity}`).toBeCloseTo(fromMock, 12);
+        }
+      }
+    }
+  });
+
+  it('computes the same overlap divisor', () => {
+    for (const steps of [1, 2, 4, 8]) {
+      for (const radius of [1, 10, 200]) {
+        expect(pluginGeometry.overlapDivisor(radius, 0.3, steps)).toBeCloseTo(
+          overlapDivisor(radius, 0.3, steps),
+          12,
+        );
+      }
     }
   });
 });

@@ -305,6 +305,28 @@ export const PointSchema = z.object({
 export type Point = z.infer<typeof PointSchema>;
 
 /**
+ * A synthesized brush tip: a soft edge built out of concentric discs.
+ *
+ * This is NOT a Photoshop brush. The brush engine cannot be reached on this host
+ * from either UXP or ExtendScript (`app.brushes` does not exist), so a soft edge
+ * has to be geometry. `core` is the fraction of the diameter painted opaque; the
+ * rest fades to `outerAlpha` across `steps` discs, filled largest-first so the
+ * core lands last and wins.
+ *
+ * Omitting `tip` entirely draws a single flat disc, which is what every stroke
+ * looked like before this existed — so this is strictly additive.
+ */
+export const TipModelSchema = z.object({
+  /** Fraction of the diameter painted at full alpha, 0.05-1. */
+  core: z.number().min(0.05).max(1),
+  /** Concentric discs used for the falloff, 1-8. 1 means a flat disc. */
+  steps: z.number().int().min(1).max(8),
+  /** Alpha of the outermost ring as a fraction of the core, 0-1. */
+  outerAlpha: z.number().min(0).max(1),
+});
+export type TipModel = z.infer<typeof TipModelSchema>;
+
+/**
  * The layer name a stroke lands on when `newLayer` is set without `layerName`.
  *
  * The plugin has its own copy of this string — it is standalone CommonJS shipped
@@ -344,6 +366,16 @@ const BrushStrokeParamsBase = DocumentTargetSchema.extend({
   brushName: z.string().min(1).optional(),
   /** Stroke width in pixels. This is the diameter of the round brush that is swept along the path. */
   brushSize: z.number().int().positive().max(5000).optional(),
+  /**
+   * Distance between discs as a fraction of the radius.
+   *
+   * The rasterizer previously derived this itself and always swept discs at 40% of
+   * the radius, which left overlapping stamps so dense that a translucent stroke
+   * had to be compensated hard. This makes the density a dial: lower is denser and
+   * more opaque per stroke, and costs one Photoshop fill per disc, so it is
+   * quality against wall-clock. Omitted, 0.4 is used and nothing changes.
+   */
+  spacing: z.number().gt(0).max(1).optional(),
   /** Stroke colour. */
   color: RgbInputSchema.default({ r: 0, g: 0, b: 0 }),
   /**
@@ -358,6 +390,16 @@ const BrushStrokeParamsBase = DocumentTargetSchema.extend({
   opacity: z.number().min(0).max(100).default(100),
   /** Blend mode the stroke is composited with. */
   blendMode: BlendModeSchema.optional(),
+  /**
+   * A synthesized soft edge. Omit it for a flat disc.
+   *
+   * Declared on the base rather than on one operation, because the painting engine
+   * emits point lists and therefore calls `paint_stroke`. With the tip on
+   * `stroke_path` only, zod *stripped* it from every `paint_stroke` call instead of
+   * rejecting it — so the engine's soft brushes silently arrived as flat discs and
+   * the result reported `tip: null`. A quietly worse picture, and never an error.
+   */
+  tip: TipModelSchema.optional(),
   /** Paint onto a new layer instead of the active layer. */
   newLayer: z.boolean().default(false),
   /** Name for the layer when `newLayer` is set. */
@@ -480,8 +522,9 @@ export const BrushStrokeResultSchema = z.object({
   brushSize: z.number().int().optional(),
   blendMode: z.string().optional(),
   /**
-   * Always `'rasterized-stroke'`. Named so a caller is never left believing the
-   * Photoshop brush engine ran.
+   * How the stroke was actually made: `'rasterized-stroke'` for a flat disc, or
+   * `'rasterized-stroke-synthesized-tip'` when a `tip` was supplied. Named so a
+   * caller is never left believing the Photoshop brush engine ran.
    */
   methodUsed: z.string().optional(),
   /** How many discs were filled. */
@@ -497,6 +540,14 @@ export const BrushStrokeResultSchema = z.object({
   verified: z.boolean().nullable().optional(),
   /** True when the stamp cap stopped the stroke before its end. */
   truncated: z.boolean().optional(),
+  /** The tip that was rasterized, or `null` for a flat disc. */
+  tip: TipModelSchema.nullable().optional(),
+  /**
+   * True when the soft edge was synthesized from concentric discs rather than
+   * produced by Photoshop's brush engine, which this host cannot reach. `null`
+   * when no tip was asked for.
+   */
+  tipIsSynthesized: z.boolean().nullable().optional(),
 });
 export type BrushStrokeResult = z.infer<typeof BrushStrokeResultSchema>;
 
@@ -1180,7 +1231,12 @@ export const OPERATIONS = {
     title: 'Stroke Path',
     description:
       'Draw a stroke along a path. The path is rasterized by sweeping round discs of `brushSize` along it, so ' +
-      'the result has round ends and round corners and the requested width, but no brush tip texture. `curve` ' +
+      'the result has round ends and round corners and the requested width. `tip` optionally gives the disc a ' +
+      'soft edge by stacking concentric rings (largest first) — that is a synthesized tip built from geometry, ' +
+      'NOT a Photoshop brush preset, because the brush engine cannot be reached from this host; the result ' +
+      'reports `methodUsed: "rasterized-stroke-synthesized-tip"` and `tipIsSynthesized: true` when one is used. ' +
+      'Omit `tip` for a flat disc. `spacing` (0-1) sets disc density as a fraction of the radius: lower is ' +
+      'denser and costs one Photoshop fill per disc, so it is quality against wall-clock. `curve` ' +
       'segments are followed as real cubic Béziers. `simulatePressure` tapers both ends as if the pen pressed ' +
       'down and lifted off. Paints onto the active layer unless `newLayer` is true. The stroke is verified by ' +
       'sampling the canvas along the path before and after, so a reported success means pixels actually moved. ' +
