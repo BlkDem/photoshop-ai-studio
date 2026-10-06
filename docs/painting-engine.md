@@ -488,9 +488,30 @@ of a layer did nothing without reading every stroke.
 Two plugin tests pin this, including the one that matters most: the no-op path must
 not swallow the failure it used to share a code with.
 
-**Not verified live.** Photoshop caches a loaded plugin, so reinstalling does not
-reload it — the log after this change still shows the old error message. Verifying it
-needs a Photoshop restart, which is not something to do unattended.
+**Verified live**, after a Photoshop restart: the running plugin reports
+`buildId d356632fc106`, matching the sources on disk, and the no-op path returns
+`success: true` with `noOp: true` while the strict `silentHost` case still throws.
+
+Nine of fifty-three foam strokes still come back `STEP_FAILED`, and the tempting read
+— "these are no-ops, loosen the check" — is wrong. The check already distinguishes the
+two cases, and loosening it would trade a real defect for an invisible one:
+
+- The foam layer is `scatteredDabs`: forty-plus dabs of one colour into one region.
+  Later dabs land on the colour the earlier ones just produced, which is genuinely
+  nothing changing.
+- But "the canvas already holds the stroke's colour" and "the target layer is hidden"
+  are indistinguishable from the samples, because a canvas after painting white onto
+  white and a canvas after painting white onto nothing both read as white. The
+  existing check separates them by asking whether the canvas matches; that works, and
+  the nine failures are precisely the dabs whose accumulated colour is *near* but not
+  *within* tolerance of the target.
+- Allowing those would make a genuinely hidden layer report success having drawn
+  nothing, which is the bug the strict contract exists to catch.
+
+So the defect is upstream: a plan should not ask for sixty dabs of one colour into one
+region. That is recipe work. Weakening verification to hide it would have moved a real
+bug out of sight, which is how it would have been found again much later and much more
+expensively.
 
 ## 6. Working on this
 
