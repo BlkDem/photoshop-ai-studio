@@ -1197,8 +1197,13 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
    * Layers that have at least one stroke on them, so the preview can leave their
    * artwork alone instead of drawing a grey placeholder over it.
    */
-  private previewPaintedLayerIds(): Set<number> {
-    return new Set(this.strokes.map((stroke) => stroke.layerId));
+  private previewPaintedLayerIds(doc: MockDocument): Set<number> {
+    // The background layer is in here unconditionally. Its job is to be the ground,
+    // which `groundColor` already draws, and leaving its schematic band in place put
+    // a flat 55%-alpha grey over the entire painting: the critic measured the result
+    // living inside a luminance band 0.08 wide and called the horizon invisible,
+    // when what was actually wrong was a placeholder rectangle over the top of it.
+    return new Set([...this.strokes.map((stroke) => stroke.layerId), ...doc.layers.filter((l) => l.isBackground).map((l) => l.id)]);
   }
 
   /** The colour a `sample_color` read should report, honouring drawn strokes. */
@@ -1332,7 +1337,7 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
       doc.layers.filter((l) => l.visible).map((l) => ({ ...l, scale })),
       this.previewStrokes(doc, scale),
       this.previewGradients(doc, scale),
-      this.previewPaintedLayerIds(),
+      this.previewPaintedLayerIds(doc),
     );
     writeFileSync(path, png);
     return { path, format: 'png', bytes: png.byteLength, overwritten: params.overwrite };
@@ -1383,7 +1388,7 @@ export class MockPhotoshopAdapter implements PhotoshopAdapter {
       doc.layers.filter((l) => l.visible).map((l) => ({ ...l, scale })),
       this.previewStrokes(doc, scale),
       this.previewGradients(doc, scale),
-      this.previewPaintedLayerIds(),
+      this.previewPaintedLayerIds(doc),
     );
     return { mimeType: 'image/png', base64: png.toString('base64'), width, height };
   }

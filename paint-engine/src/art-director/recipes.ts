@@ -65,14 +65,15 @@ function skyStage(brief: Brief, horizon: number): PlanStage {
     // version built both from `shadows` and the two thirds of the picture collapsed
     // into one flat field with an invisible line down the middle of it.
     { primitive: 'glaze', region: band(0, horizon * 0.98), colorRole: 'midtones', energy: 1 },
-    { primitive: 'glaze', region: band(horizon * 0.3, horizon * 0.7), colorRole: 'highlights', energy: 0.6 },
+    // Light at the horizon, and the value falling away above it. A sky painted at
+    // one value is a backdrop, not weather.
+    { primitive: 'glaze', region: band(horizon * 0.62, horizon * 0.38), colorRole: 'highlights', energy: 0.9 },
   ];
 
-  if (brief.contrast === 'high') {
-    // Weight the top of the sky so the value falls toward the horizon, which is
-    // what opens up the depth in a storm.
-    strokes.unshift({ primitive: 'glaze', region: band(0, horizon * 0.45), colorRole: 'shadows', energy: 0.7 });
-  }
+  // A dark weight at the top of the sky, always. This is the top of the value range
+  // on the sky side, and without it a bright sky has no ceiling for the clouds to
+  // be darker than.
+  strokes.unshift({ primitive: 'glaze', region: band(0, horizon * 0.5), colorRole: 'shadows', energy: 1 });
 
   if (brief.atmosphere === 'golden' || brief.colorTemperature === 'warm') {
     // Warm light low in the sky, near the horizon, because that is where a low
@@ -114,13 +115,17 @@ function cloudStage(brief: Brief, horizon: number, rng: Rng): PlanStage {
   const strokes: StrokeRecipe[] = [];
 
   for (let i = 0; i < lobes; i += 1) {
-    const height = rng.range(0.14, 0.3) * horizon;
+    // Wider and taller than a literal cloud. The critic reported that a third of the
+    // canvas was untouched ground while every one of these looked reasonable in the
+    // plan: a lobe 0.4 wide covers 4% of the picture, and a sky with three of them
+    // is mostly still sky.
+    const height = rng.range(0.22, 0.42) * horizon;
     strokes.push({
       primitive: 'cloud',
       region: {
-        x: rng.range(-0.05, 0.55),
+        x: rng.range(-0.05, 0.5),
         y: rng.range(0, Math.max(0.05, horizon - height)),
-        width: rng.range(0.35, 0.7),
+        width: rng.range(0.5, 0.9),
         height,
       },
       colorRole: i % 2 === 0 ? 'shadows' : 'midtones',
@@ -203,6 +208,20 @@ function waterStage(horizon: number, rng: Rng, detail: number): PlanStage {
     { primitive: 'glaze', region: band(horizon, depth), colorRole: 'shadows', energy: 0.9 },
     { primitive: 'glaze', region: band(horizon, depth * 0.5), colorRole: 'shadows', energy: 0.5 },
     { primitive: 'glaze', region: band(horizon + depth * 0.45, depth * 0.55), colorRole: 'midtones', energy: 0.45 },
+    // The deepest value in the picture, at the front. Water gets darker toward the
+    // viewer because it is further from the light and in its own shadow, and a
+    // painting with no dark in it has nothing for its lights to read against.
+    //
+    // Four passes, because one does not reach. A single stroke of the darkest colour
+    // in the palette lands nowhere near it: the tip is a soft blob with a partial
+    // core and the preview splits it into rings that each deposit a fraction of the
+    // opacity. The critic measured the result at a luminance of 0.78 when the
+    // palette's darkest is 0.10, so the value has to be built the way a painter
+    // builds it — repeatedly, and never in one pass.
+    { primitive: 'glaze', region: band(horizon + depth * 0.72, depth * 0.28), colorRole: 'shadows', energy: 1 },
+    { primitive: 'glaze', region: band(horizon + depth * 0.6, depth * 0.4), colorRole: 'shadows', energy: 1 },
+    { primitive: 'glaze', region: band(horizon + depth * 0.5, depth * 0.5), colorRole: 'shadows', energy: 0.9, jitter: 0.25 },
+    { primitive: 'glaze', region: band(horizon, depth), colorRole: 'shadows', energy: 0.8, jitter: 0.3 },
   ];
 
   const bands = 3 + Math.round(detail * 3);
@@ -263,7 +282,7 @@ function foamStage(horizon: number, rng: Rng, strength: number): PlanStage {
         // Weighted low. Spray belongs at the front of the picture; foam scattered
         // evenly from the horizon to the bottom edge reads as dust on a lens.
         y: horizon + depth * rng.range(0.55, 0.99),
-        width: rng.range(0.25, 0.55),
+        width: rng.range(0.35, 0.7),
         height: depth * rng.range(0.04, 0.1),
       },
       colorRole: 'highlights',
@@ -375,14 +394,27 @@ function subjectStage(brief: Brief, horizon: number, focal: { x: number; y: numb
   };
 }
 
-/** Final unifying pass: one broad glaze over everything, at very low opacity. */
-function glazeStage(brief: Brief, rng: Rng): PlanStage {
+/**
+ * Final unifying pass: one broad glaze, low down, at very low opacity.
+ *
+ * It used to cover the entire canvas. A single colour over everything is by
+ * construction a device for removing value differences — the critic measured the
+ * result and reported the picture living inside a luminance band of 0.08, with the
+ * horizon invisible, which is exactly what a full-canvas wash does and no accident
+ * of colour choice can rescue.
+ *
+ * Atmospheric unification belongs near the horizon, where the air actually is, so
+ * that is where it goes: a band sitting across the horizon line, light enough to
+ * tie the two halves together without painting over either.
+ */
+function glazeStage(brief: Brief, horizon: number, rng: Rng): PlanStage {
+  const depth = 1 - horizon;
   return {
     id: 'glaze',
     layer: 'Glaze',
-    purpose: 'Unifying wash that pulls the colours together',
+    purpose: 'Unifying wash across the horizon, where the air is',
     brush: 'glaze',
-    depth: 'foreground',
+    depth: 'midground',
     palette: ['midtones'],
     density: 0.5,
     detail: 0.1,
@@ -390,9 +422,9 @@ function glazeStage(brief: Brief, rng: Rng): PlanStage {
     strokes: [
       {
         primitive: 'glaze',
-        region: band(0, 1),
-        colorRole: 'midtones',
-        energy: 0.4,
+        region: band(Math.max(0, horizon - depth * 0.35), depth * 0.7),
+        colorRole: 'highlights',
+        energy: 0.25,
         jitter: rng.range(0.1, 0.3),
       },
     ],
@@ -441,7 +473,7 @@ export function stagesFor(brief: Brief, horizon: number, focal: { x: number; y: 
     stages.push(subjectStage(brief, horizon, focal));
   }
 
-  if (brief.texture !== 'smooth') stages.push(glazeStage(brief, rng));
+  if (brief.texture !== 'smooth') stages.push(glazeStage(brief, horizon, rng));
 
   // Fitted only once every stage has been added, so later stages are covered too.
   return stages.map(fitStage);

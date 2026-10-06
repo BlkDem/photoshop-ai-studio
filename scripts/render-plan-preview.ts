@@ -9,7 +9,7 @@
  */
 
 import { writeFileSync } from 'node:fs';
-import { PaintEngine, direct } from '../paint-engine/src/index.js';
+import { PaintEngine, critiquePng, formatCritique, direct } from '../paint-engine/src/index.js';
 import { MockPhotoshopAdapter } from '../mcp-server/src/adapter/mock-adapter.js';
 import { Workspace } from '../mcp-server/src/workspace.js';
 import type { PaintingPlan, PaintTarget } from '../paint-engine/src/index.js';
@@ -267,12 +267,20 @@ async function main(): Promise<void> {
   const png = Buffer.from(preview.base64, 'base64');
   writeFileSync(out, png);
 
+  // Judge the output rather than describe it. Everything that went wrong while
+  // building the Art Director — the invisible horizon, the missing value range, the
+  // picture that was mostly ground — was measurable, and being told "score 12/100,
+  // horizon delta 0.004" is a faster loop than looking at a picture and guessing.
+  const judged = critiquePng(requested, png);
+  console.log(judged.critique ? formatCritique(judged.critique, 'preview') : `unreadable: ${judged.unreadable}`);
+
   console.log(
     JSON.stringify(
       {
         out,
         request: assumptions.length > 0 ? requested.title : null,
         assumptions,
+        critique: judged.critique ? { structure: judged.critique.structureScore, findings: judged.critique.findings.map((f) => f.id) } : null,
         estimated: { layers: estimate.layers, strokes: estimate.strokes, fills: estimate.fills },
         painted: { layers: report.layers, strokes: report.strokes, batches: report.batches, fills: report.fills },
         degraded: report.degraded,

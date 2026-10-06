@@ -293,6 +293,58 @@ critique is worth building before the model-based one; the plumbing is the work.
 
 ---
 
+## 7. Vision Critic — **structure only, and that is the whole limit**
+
+`critique(plan, image)` in `paint-engine/src/critique/` reads a rendered PNG and
+reports where the picture failed, using only measurements. `measure()` computes a
+robust value range, RMS contrast, coverage against the image's own median, the mean
+luminance difference across the horizon, saturation, and local contrast at the focal
+point; `critique()` turns those into findings with the number that produced them.
+
+Every number comes from pixels, never from the plan. A critic that reads the plan can
+only say what was *asked* for, and a plan asking for a dramatic sky passes a
+dramatic-sky check while producing a grey fog. Percentiles rather than min/max
+everywhere: one stray saturated pixel sets a min/max pair, and extremes-based
+metrics report a healthy value range for a picture with none.
+
+No model is involved, for the same reason the Art Director has none. A model-backed
+critic that writes these findings as prose slots in behind `critique()` without
+changing anything above it.
+
+**It scores structure, not quality, and the field is named that way.**
+`structureScore` reached **94** on a seascape whose waves are still full-width ropes
+and whose ship is still a scribble. That is the honest ceiling of this critic: a
+picture can have a full value range, real contrast and a visible horizon and still be
+a bad painting, because nothing here looks at whether the marks are *of* anything.
+Use the number to sort renders and to fail a build; never to claim a picture is good.
+Form is a judgement call and belongs to whoever looks at the picture.
+
+What the numbers are for is stopping the failures that are invisible to the eye from
+hiding behind a picture that merely looks soft. It did that immediately. On the
+Art Director output it went 71 → 82 → 94, and between those steps it found a third
+engine bug:
+
+> **The background layer's schematic band was drawn over the whole painting.**
+> `previewPaintedLayerIds` listed layers that had strokes, and the Background layer
+> had none, so it got a flat 55%-alpha grey placeholder composited over everything
+> on top. That is why the picture measured as living inside a luminance band 0.08
+> wide with an invisible horizon — not a recipe problem at all, and I had been
+> tuning recipes against it for several rounds. The ground colour now does the
+> Background layer's job, so the band does not need to.
+
+The lesson generalises: **the failures that cost the most here were all the ones I
+could not see, and all three were one comparison away from being obvious.** Judging
+by eye from a low-resolution preview is not a substitute for measuring.
+
+Two limits worth knowing before trusting a number:
+
+- `decodePng` handles 8-bit non-interlaced RGB/RGBA and returns `null` for anything
+  else rather than guessing. A critic that misreads a 16-bit PNG and then reports
+  confident numbers is worse than one that declines.
+- Coverage is measured against the image's own median. On a pale picture that is a
+  demanding test, and a warning at 33% against a 35% threshold may be a picture that
+  is evenly pale rather than one with holes in it.
+
 ## 6. Working on this
 
 ### Two checkouts — the running one is the Windows one

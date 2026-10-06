@@ -155,3 +155,17 @@ export {
   type Element,
   type SceneKind,
 } from './art-director/director.js';
+
+export { decodePng, type RgbImage } from './critique/png.js';
+export { measure, type ImageMetrics, type BandValues } from './critique/metrics.js';
+export {
+  critique,
+  critiquePng,
+  formatCritique,
+  DEFAULT_THRESHOLDS,
+  type Critique,
+  type CritiqueOptions,
+  type Finding,
+  type Severity,
+  type Thresholds,
+} from './critique/critic.js';
