@@ -207,7 +207,15 @@ export function cloud(recipe: StrokeRecipe, rng: Rng): Path[] {
   // one budget. Splitting it wrong makes the union of the runs stick out of the
   // region, which the schema rejects and which would paint over a neighbour's marks.
   const budget = short * 0.5 * 0.85;
-  const amplitude = ((recipe.amplitude ?? 0.4) / (0.4 + 0.55)) * budget * 0.9;
+  const amplitudeParam = recipe.amplitude ?? 0.4;
+  // Amplitude against the region's *height*, not against the shared budget.
+  //
+  // Measured: a cloud asked for a 140x78px region came out 140px long and 21px tall —
+  // it filled a quarter of its own box, so it read as a ribbon with lobes rather than
+  // as a billow. The budget split was the wrong model: it conflated "how far the whole
+  // shape wanders" with "how deep the lobes are", and lobes are a property of the
+  // height. A shallow foam bank still comes out shallow, because its region is.
+  const amplitude = (amplitudeParam / 0.4) * recipe.region.height * 0.38;
   const px = -dir.y;
   const py = dir.x;
   // Passes stack across the short axis: vertically for a wide sky band, side to side

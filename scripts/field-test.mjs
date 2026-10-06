@@ -29,7 +29,10 @@ const engine = new PaintEngine();
 await call('photoshop.create_document', { name: 'fields', width: W, height: H, resolution: 72, colorMode: 'RGB', background: 'white' });
 let first = true;
 for (const stage of plan.stages) {
-  if (stage.id !== 'sky' && stage.id !== 'water') continue;
+  // Which layers to paint. Defaults to the two that carry the value structure; the
+  // formal elements can be checked on their own, which is a quarter of the time.
+  const wanted = (process.env.FIELD_STAGES ?? 'sky,water').split(',').map((s) => s.trim());
+  if (!wanted.includes(stage.id)) continue;
   const strokes = [];
   for (const s of engine.strokesForStage(plan, stage)) { const p = strokeToPixels(s, plan.canvas); if (p) strokes.push(p); }
   const t0 = Date.now();

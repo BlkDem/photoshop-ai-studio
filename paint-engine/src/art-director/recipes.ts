@@ -169,31 +169,50 @@ function cloudStage(brief: Brief, horizon: number, rng: Rng): PlanStage {
   const strokes: StrokeRecipe[] = [];
 
   for (let i = 0; i < lobes; i += 1) {
-    // Wider and taller than a literal cloud. The critic reported that a third of the
-    // canvas was untouched ground while every one of these looked reasonable in the
-    // plan: a lobe 0.4 wide covers 4% of the picture, and a sky with three of them
-    // is mostly still sky.
-    const height = rng.range(0.22, 0.42) * horizon;
-    strokes.push({
-      primitive: 'cloud',
-      region: {
-        x: rng.range(-0.05, 0.5),
-        y: rng.range(0, Math.max(0.05, horizon - height)),
-        width: rng.range(0.5, 0.9),
-        height,
-      },
-      colorRole: i % 2 === 0 ? 'shadows' : 'midtones',
-      energy: rng.range(0.5, 0.95),
-    });
+    // Aspect ratio decides whether this is a lump or a bar.
+    //
+    // Measured off a real render: the sky's clouds came out as 507px wide and 20px
+    // tall. That is not a cloud, it is a shelf, and it is what the region asked for —
+    // `cloud` walks a lobe run along the region's long axis, so a region three times
+    // wider than it is tall produces a shape three times wider than it is tall. A
+    // billow needs proportions near one, and a cloud is a *cluster* of them.
+    //
+    // So: several small ones, each roughly square, placed to overlap. Coverage comes
+    // from the number of clusters rather than from the size of each.
+    const perCluster = 2 + Math.round(rng.range(0, 1));
+    for (let k = 0; k < perCluster; k += 1) {
+      const width = rng.range(0.14, 0.3);
+      const height = width * rng.range(0.55, 0.95);
+      strokes.push({
+        primitive: 'cloud',
+        region: {
+          x: rng.range(-0.05, 0.95 - width),
+          y: rng.range(0, Math.max(0.03, horizon - height)),
+          width,
+          height,
+        },
+        colorRole: i % 2 === 0 ? 'shadows' : 'midtones',
+        energy: rng.range(0.5, 0.95),
+      });
+    }
   }
 
-  // A lit top on each lobe. Without it the clouds are a single dark mass and a
-  // stormy sky has no form in it at all.
+  // A lit top on the cloud mass. This was a `highlight` over a wide shallow region,
+  // and `highlight` picked the wrong axis for it: the plan asked for a band 0.6 wide
+  // and 0.18 tall and got a stroke 34px wide and 136px tall — a pale column standing
+  // in the middle of the sky. `cloud` is the primitive that renders as a form now
+  // that its aspect and amplitude are right, so the lit top is another small one.
+  const litWidth = rng.range(0.12, 0.22);
   strokes.push({
-    primitive: 'highlight',
-    region: { x: 0.18, y: horizon * 0.1, width: 0.6, height: horizon * 0.3 },
+    primitive: 'cloud',
+    region: {
+      x: rng.range(0.1, 0.7),
+      y: horizon * rng.range(0.15, 0.4),
+      width: litWidth,
+      height: litWidth * rng.range(0.5, 0.85),
+    },
     colorRole: 'midtones',
-    energy: 0.3,
+    energy: 0.35,
     blendMode: 'screen',
   });
 
@@ -336,18 +355,25 @@ function waterStage(horizon: number, rng: Rng, detail: number): PlanStage {
 function foamStage(horizon: number, rng: Rng, strength: number): PlanStage {
   const depth = 1 - horizon;
   const strokes: StrokeRecipe[] = [];
-  const banks = 3 + Math.round(strength * 4);
+  const banks = 6 + Math.round(strength * 8);
 
   for (let i = 0; i < banks; i += 1) {
+    // Width first, height from it, and only then a position that can hold the whole
+    // thing. The first version placed the bank and derived its height afterwards,
+    // which put banks at the very bottom edge where `fit` clamped them from 20px to
+    // 2px — a row of hairlines across the front of the picture.
+    const width = rng.range(0.05, 0.14);
+    const height = width * rng.range(0.5, 0.9);
+    const top = Math.min(1 - height, horizon + depth * rng.range(0.45, 0.99));
     strokes.push({
       primitive: 'cloud',
       region: {
-        x: rng.range(-0.1, 0.9),
-        // Weighted low. Spray belongs at the front of the picture; foam scattered
+        x: rng.range(-0.05, 0.95),
+        // Weighted low: spray belongs at the front of the picture, and foam scattered
         // evenly from the horizon to the bottom edge reads as dust on a lens.
-        y: horizon + depth * rng.range(0.5, 0.99),
-        width: rng.range(0.2, 0.5),
-        height: depth * rng.range(0.03, 0.08),
+        y: top,
+        width,
+        height,
       },
       colorRole: 'highlights',
       energy: rng.range(0.5, 0.95),
