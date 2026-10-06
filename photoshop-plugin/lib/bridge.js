@@ -32,6 +32,7 @@ var adapter = require('./adapter.js');
 var errors = require('./errors.js');
 var Logger = require('./logger.js').Logger;
 var uxp = require('uxp');
+var buildInfo = require('./build-info.js');
 var versions = uxp.versions;
 var storage = uxp.storage;
 
@@ -355,6 +356,10 @@ function open() {
       payload: {
         pluginId: 'com.blkdem.photoshop-ai-studio',
         pluginVersion: '0.1.0',
+        // Which source this was built from, so "is the running plugin the code on
+        // disk" is answerable instead of guessed at from log text. Photoshop caches
+        // a loaded plugin, and reinstalling does not replace it in memory.
+        buildId: buildInfo.buildId,
         uxpVersion: uxpVersion(),
         hostApp: 'photoshop',
         hostVersion: hostVersion(),

@@ -40,6 +40,14 @@ export const BRIDGE_PROTOCOL_VERSION = 1;
 export const PluginHelloPayloadSchema = z.object({
   pluginId: z.string(),
   pluginVersion: z.string(),
+  /**
+   * Hash of the plugin sources it was built from, absent on plugins predating it.
+   *
+   * Optional because it has to be: Photoshop caches a loaded plugin, so an old
+   * build will keep saying hello without this field, and a required one would make
+   * the server reject exactly the plugin you are trying to compare against.
+   */
+  buildId: z.string().optional(),
   uxpVersion: z.string(),
   hostApp: z.string(),
   hostVersion: z.string(),

@@ -185,11 +185,24 @@ export class PluginBridge {
           data: {
             pluginId: message.payload.pluginId,
             pluginVersion: message.payload.pluginVersion,
+            // Logged because it is the only way to tell the running plugin from the
+            // code on disk. Photoshop caches a loaded plugin, so reinstalling a build
+            // does not change the one in memory, and nothing else says so: a fix that
+            // "did not work" is otherwise indistinguishable from a fix that was never
+            // loaded. Compare this with `scripts/check-plugin-build.mjs`.
+            buildId: message.payload.buildId,
             workspaceRoot: message.payload.config?.workspaceRoot,
             outputDir: message.payload.config?.outputDir,
             configError: message.payload.config?.error,
           },
         });
+        if (message.payload.buildId) {
+          this.logger.info({
+            event: 'photoshop.request',
+            message: `plugin build ${message.payload.buildId}`,
+            data: { buildId: message.payload.buildId },
+          });
+        }
         if (!message.payload.config?.workspaceRoot) {
           // The single most common cross-OS failure: paths arrive workspace-relative
           // and the plugin cannot resolve them without a root.

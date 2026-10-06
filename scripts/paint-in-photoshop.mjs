@@ -21,7 +21,7 @@
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { writeFileSync, mkdirSync, existsSync, unlinkSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { direct, PaintEngine, strokeToPixels, critiquePng, formatCritique } from '../paint-engine/dist/index.js';
 
@@ -89,10 +89,56 @@ const toParams = (strokes) =>
     ...(s.blendMode ? { blendMode: s.blendMode } : {}),
   }));
 
+/**
+ * A run holds this file for as long as it is painting.
+ *
+ * Photoshop processes one modal scope at a time, so two of these do not run in
+ * parallel — they queue, and each looks like a machine that has hung. That is not
+ * hypothetical: three of these were started without waiting for the previous one and
+ * Photoshop spent twenty minutes on work nobody was watching, flickering the whole
+ * time because every one of several hundred thousand fills is a visible elliptical
+ * selection. The lock makes the second run say so and stop.
+ *
+ * Stale locks are reclaimed rather than trusted: a run killed mid-paint leaves the
+ * file behind, and a lock nobody can clear is worse than no lock.
+ */
+const LOCK = 'workspace/.paint-lock';
+
+function acquireLock() {
+  mkdirSync(dirname(LOCK), { recursive: true });
+  if (existsSync(LOCK)) {
+    const ageSeconds = (Date.now() - Number(readFileSync(LOCK, 'utf8').trim())) / 1000;
+    if (ageSeconds < 900) {
+      console.error(
+        `Another paint run started ${Math.round(ageSeconds / 60)} min ago and holds ${LOCK}.\n` +
+          'Photoshop processes one at a time; this would queue behind it. Wait for it, or delete the file if it is dead.',
+      );
+      return false;
+    }
+    console.error(`reclaiming a ${Math.round(ageSeconds / 60)} min old lock at ${LOCK}`);
+    unlinkSync(LOCK);
+  }
+  writeFileSync(LOCK, String(Date.now()));
+  const release = () => {
+    try {
+      unlinkSync(LOCK);
+    } catch {
+      // Already gone; nothing to clean up.
+    }
+  };
+  process.on('exit', release);
+  process.on('SIGINT', () => {
+    release();
+    process.exit(130);
+  });
+  return true;
+}
+
 async function main() {
   const request = process.argv[2] ?? 'stormy seascape with a ship and breaking waves, moonlight';
   const out = process.argv[3] ?? 'workspace/photoshop-real.png';
 
+  if (!acquireLock()) return;
   const client = await connect();
 
   // Confirm the plugin is actually attached before spending minutes of fills.
@@ -113,6 +159,11 @@ async function main() {
   console.log(`request: ${request}`);
   for (const a of assumptions) console.log(`  assume: ${a}`);
   console.log(`layers: ${plan.layers.join(' -> ')}`);
+  const estimate = new PaintEngine().estimate(plan);
+  console.log(
+    `estimate: ${estimate.strokes} strokes, ${estimate.fills} fills. ` +
+      'At the measured fill rate this is minutes per layer — one run at a time.',
+  );
 
   await call(client, 'photoshop.create_document', {
     name: plan.title.slice(0, 40) || 'painting',
