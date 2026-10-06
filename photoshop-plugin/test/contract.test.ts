@@ -165,6 +165,10 @@ describe('plugin / shared contract', () => {
     // `lib/ps.js` is the wrapper that runs and inspects descriptors;
     // `lib/ops/*` are the individual operations; `lib/demo.js` is the panel's
     // demo-document builder, which is deliberately NOT an MCP tool.
+    //
+    // Note that sanctioning a *file* is not the same as permitting it to use any
+    // descriptor — `lib/demo.js` was sanctioned here and then used the `make`
+    // descriptor that hangs Photoshop, which is what the next test now catches.
     const SANCTIONED = ['lib/ps.js', 'lib/demo.js'];
     const offenders: string[] = [];
 
@@ -187,6 +191,82 @@ describe('plugin / shared contract', () => {
     if (stripComments(read('index.js')).includes('.batchPlay(')) offenders.push('index.js');
 
     expect(offenders, `batchPlay outside the sanctioned files: ${offenders.join(', ')}`).toEqual([]);
+  });
+
+  it('never uses a descriptor that is measured to hang this host', () => {
+    // The three descriptors below are recorded in `lib/ops/capabilities.js` as
+    // measured failures on this build, not assumptions:
+    //
+    //   _obj: 'make'   — does not return; leaves Photoshop waiting, and every
+    //                     later call on that host stops answering
+    //   _obj: 'stroke' — hangs, because a descriptor without strokeStyle leaves
+    //                     Photoshop waiting on a dialog a modal scope cannot
+    //                     dismiss
+    //   _obj: 'paint'  — rejected as "command unavailable"
+    //
+    // `capabilities.js` is exempt because it *documents* them in prose and has to
+    // name them to do so. Every other plugin file must be free of them: a hang is
+    // not a thrown error, so nothing catches it at runtime and it takes the whole
+    // host with it. This test exists because one did — `lib/demo.js` asked for a
+    // `solidColorLayer` and the file was sanctioned above, so nothing objected.
+    const FORBIDDEN = ["_obj: 'make'", '_obj: "make"', "_obj: 'stroke'", '_obj: "stroke"', "_obj: 'paint'", '_obj: "paint"'];
+    const EXEMPT = ['lib/ops/capabilities.js'];
+
+    const offenders: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(join(pluginRoot, dir))) {
+        const relative = `${dir}/${entry}`;
+        if (statSync(join(pluginRoot, relative)).isDirectory()) {
+          if (entry === 'test') continue;
+          walk(relative);
+          continue;
+        }
+        if (!entry.endsWith('.js')) continue;
+        if (EXEMPT.includes(relative)) continue;
+        const code = stripComments(read(relative));
+        for (const descriptor of FORBIDDEN) {
+          if (code.includes(descriptor)) offenders.push(`${relative}: ${descriptor}`);
+        }
+      }
+    };
+    walk('lib');
+    if (stripComments(read('index.js')).includes("_obj: 'make'")) offenders.push("index.js: _obj: 'make'");
+
+    expect(
+      offenders,
+      `descriptors that hang this host: ${offenders.join(', ')}. Use ps.fillSelection over a selection instead.`,
+    ).toEqual([]);
+  });
+
+  it('dials a hostname, never an IP literal', () => {
+    // The single most expensive undocumented detail in this plugin, and the one
+    // most likely to be "fixed" by someone who has just chased a network problem.
+    //
+    // UXP's manifest parser discards IP-literal hosts *before* matching a URL
+    // against `requiredPermissions.network.domains`. So `ws://127.0.0.1:3002/bridge`
+    // is refused with "Permission denied … Manifest entry not found" no matter how
+    // the domain list is spelled — not `ws://127.0.0.1/`, not `ws://127.0.0.1:3002/`,
+    // not even `ws://*` (top-level wildcards are rejected outright from UXP 7.4).
+    //
+    // Only `ws://localhost/` in the manifest plus `localhost` in the URL works.
+    // ADR-001 in docs/architecture.md records the measurement; these assertions
+    // exist so it cannot be undone by a well-meaning change.
+    const manifest = JSON.parse(read('manifest.json')) as {
+      requiredPermissions: { network: { domains: string[] } };
+    };
+    const domains = manifest.requiredPermissions.network.domains;
+    expect(domains, 'the loopback origin UXP actually accepts is missing').toContain('ws://localhost/');
+    expect(domains, 'top-level wildcard domains are rejected from UXP 7.4').not.toContain('ws://*');
+
+    const shipped = JSON.parse(read('config.json')) as { bridgeUrl: string };
+    expect(shipped.bridgeUrl).toBe('ws://localhost:3002/bridge');
+
+    // The built-in fallback matters as much as the shipped value: it is what the
+    // plugin uses when config.json cannot be read at all.
+    const bridge = stripComments(read('lib/bridge.js'));
+    const defaults = bridge.slice(bridge.indexOf('function loadConfig'));
+    const url = defaults.match(/bridgeUrl:\s*'([^']+)'/)?.[1];
+    expect(url, 'could not find the default bridgeUrl').toBe('ws://localhost:3002/bridge');
   });
 
   it('uses the documented UXP export path, not the ExtendScript one', () => {

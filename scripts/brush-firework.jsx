@@ -1,18 +1,22 @@
 /*
- * Paints a firework with real brushes, through ExtendScript.
+ * DOES NOT WORK ON THIS BUILD. Kept as a reproduction, not as a demo.
  *
- * The UXP surface the plugin drives has no brush, and this build's DOM layer
- * factories return 0×0 layers, so there is nowhere there to put a stroke.
- * ExtendScript reaches the same Photoshop through a different door and still has
- * `app.brushes`.
+ * This script was written on the belief that ExtendScript could reach Photoshop's
+ * brush engine through COM even though UXP cannot, and it was cited in
+ * `capabilities.js` and `docs/architecture.md` as proof that it could. That was
+ * never verified. Run it and it reports:
  *
- * The brush work is `PathItem.stroke(brush, color)` — Photoshop's own brush
- * engine painting along a path, with a real tip, not a shape being filled. Each
- * burst is a core of short bright strokes plus a halo of long soft ones, which
- * is what makes it read as an explosion rather than a starburst.
+ *     brushUsed=false; strokes=0; bursts=-1; error=undefined is not an object
  *
- * If the brush engine refuses on this build, `brushUsed` comes back false and the
- * script says so rather than quietly drawing something else.
+ * `bursts=-1` is the sentinel set immediately before `pickBrush()` touches
+ * `app.brushes`, and on Photoshop 26.11.7 that property is `undefined` — as is
+ * `app.activeBrush`. With no Brush object there is nothing to pass to
+ * `PathItem.stroke()`, so the real brush engine is unreachable from this door as
+ * well as from UXP.
+ *
+ * `scripts/probe-brush-dom.jsx` is the minimal version that reports the facts
+ * without attempting a stroke. Do not "fix" this script and expect it to work:
+ * the brush engine is simply not exposed.
  */
 #target photoshop
 

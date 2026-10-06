@@ -103,27 +103,94 @@ function renameBackground(doc, name) {
   return fitRect(doc, layer, 0, 0, doc.width, doc.height);
 }
 
+/**
+ * A coloured rectangle, built the only way this host can put colour into pixels.
+ *
+ * ## Why not the solid-fill descriptor
+ *
+ * This used to ask `batchPlay` for a `make` / `solidColorLayer` content layer,
+ * on the assumption it was "the most portable way to get a coloured rectangle".
+ * It is not available here: `capabilities.js` records that route as measured to
+ * **not return** — it leaves Photoshop waiting on a dialog a modal scope cannot
+ * dismiss, and every later call on that host stops answering. The tool that
+ * needed a solid fill was removed rather than shipped (ADR-013); this affordance
+ * was missed in that removal and kept calling the dead route.
+ *
+ * So the rectangle is made the way `ops/brush.js` makes every stroke: create a
+ * layer, select the rectangle, fill the selection. Both halves of that are on the
+ * capability report's VERIFIED list.
+ */
 function makeRect(doc, spec) {
-  // A solid-colour fill layer is the most portable way to get a coloured
-  // rectangle: no asset file, no selection, no fill dialog.
+  var created;
+  try {
+    created = doc.createLayer({ name: spec.name });
+  } catch (err) {
+    throw errors.StudioError('STEP_FAILED', 'Could not create the "' + spec.name + '" layer: ' + ((err && err.message) || String(err)));
+  }
+
+  // Resolve before selecting: `createLayer` returns a handle whose `id` is not
+  // populated yet, and handing that to `document.activeLayers` is a type error
+  // in UXP rather than a silent no-op.
+  return ps.resolveCreatedLayer(doc, created).then(function (layer) {
+    return fillRect(doc, layer, spec);
+  });
+}
+
+function fillRect(doc, layer, spec) {
   return ps
-    .batchPlay([
-      {
-        _obj: 'make',
-        _target: [{ _ref: 'contentLayer' }],
-        using: {
-          _obj: 'solidColorLayer',
-          color: { _obj: 'RGBColor', red: spec.color.r, green: spec.color.g, blue: spec.color.b },
-        },
-        _options: { dialogOptions: 'dontDisplay' },
-      },
-    ])
+    .withForegroundColor(spec.color, function () {
+      // Select the layer before filling. `createLayer` does not select what it
+      // creates on this build, so without this the rectangle is painted onto
+      // whatever was active — the Background — and the new layer comes back 0x0.
+      // That is exactly the "Logo layer came back empty" symptom, and it looks
+      // like Photoshop refusing to create a layer when it is really a selection
+      // bug on our side.
+      return Promise.resolve(ps.selectLayer(layer))
+        .then(function () {
+          return Promise.resolve(
+            doc.selection.selectRectangle(
+              { left: spec.x, top: spec.y, right: spec.x + spec.width, bottom: spec.y + spec.height },
+              selectionType(),
+            ),
+          );
+        })
+        .then(function () {
+          return ps.fillSelection(100, 'normal');
+        });
+    })
     .then(function () {
-      var layer = topLayer(doc);
-      if (!layer) throw errors.StudioError('STEP_FAILED', 'The fill layer was not created.');
-      layer.name = spec.name;
+      return Promise.resolve(doc.selection.deselect());
+    })
+    .then(function () {
+      // A 0x0 layer here means this host ignored the fill, which `ops/gradient.js`
+      // already treats as UNSUPPORTED_OPERATION. Reported as such rather than
+      // returned as a success, because a 0x0 layer passes every declared check
+      // and produces a document with a hole in it.
+      var bounds = ps.boundsOf(layer);
+      if (!bounds || bounds.width <= 0 || bounds.height <= 0) {
+        throw errors.StudioError(
+          'UNSUPPORTED_OPERATION',
+          'The "' + spec.name + '" layer came back empty: this Photoshop build creates every pixel layer 0x0 and ' +
+            'a selection fill did not give it any area. Text layers still work, so the rest of the demo document is fine.',
+          { details: { requested: { x: spec.x, y: spec.y, width: spec.width, height: spec.height }, actual: bounds || null } },
+        );
+      }
       return fitRect(doc, layer, spec.x, spec.y, spec.width, spec.height);
     });
+}
+
+/**
+ * `selection.selectRectangle` needs a selection type, and the enum has held
+ * different spellings across builds. Mirrors `ops/brush.js` and `ops/canvas.js`,
+ * which resolve it the same way for the same reason.
+ */
+function selectionType() {
+  var enumObject = ps.constants && ps.constants.SelectionType;
+  if (enumObject) {
+    if (typeof enumObject.REPLACE !== 'undefined') return enumObject.REPLACE;
+    if (typeof enumObject.replace !== 'undefined') return enumObject.replace;
+  }
+  return 'set';
 }
 
 function makeText(doc, spec) {
@@ -182,12 +249,6 @@ function fitRect(doc, layer, x, y, width, height) {
   var after = ps.boundsOf(layer);
   layerOps.translateBy(layer, x - after.x, y - after.y);
   return layer;
-}
-
-function topLayer(doc) {
-  var layers = doc.layers;
-  if (!layers || layers.length === 0) return null;
-  return layers[layers.length - 1];
 }
 
 module.exports = {

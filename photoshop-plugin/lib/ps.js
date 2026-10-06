@@ -211,6 +211,116 @@ function openDocumentNames() {
 }
 
 /**
+ * Makes `layer` the one subsequent operations act on.
+ *
+ * Creating a layer does **not** select it on this build. That is easy to miss
+ * because it is invisible when the thing being created is the whole point, and
+ * very visible when it is not: a fill or a stroke issued right after
+ * `createLayer()` lands on whatever was active before, and the new layer comes
+ * back empty. Two places got this wrong before this helper existed —
+ * `ops/brush.js: createStrokeLayer` painted onto the previous layer, and
+ * `lib/demo.js: makeRect` filled the Background instead of the rectangle.
+ *
+ * `activeLayers` (plural) is the UXP 2 API spelling; `activeLayer` is kept as a
+ * fallback for builds that only have the older getter/setter pair.
+ */
+function selectLayer(layer) {
+  if (!layer) return Promise.resolve(null);
+  var doc = layer.parent || (app && app.activeDocument);
+  if (!doc) return Promise.resolve(null);
+
+  if ('activeLayers' in doc || Array.isArray(doc.activeLayers)) {
+    doc.activeLayers = [layer];
+    return Promise.resolve(layer);
+  }
+  try {
+    doc.activeLayer = layer;
+  } catch (err) {
+    Logger.warn('selectLayer: could not select "' + (layer.name || '?') + '"', {
+      message: (err && err.message) || String(err),
+    });
+    return Promise.resolve(null);
+  }
+  return Promise.resolve(layer);
+}
+
+/**
+ * Fills the current selection with the foreground colour.
+ *
+ * Lives here rather than inside `ops/brush.js` because it is the **only** way
+ * this host puts colour into pixels, and two modules needing it is how they end
+ * up disagreeing about it. `ops/gradient.js` reaches the same verdict by other
+ * means; `lib/demo.js` needs it too, and before this move `demo.js` reached for
+ * the `make`/`solidColorLayer` descriptor instead — the exact route
+ * `capabilities.js` records as a measured hang that leaves Photoshop waiting.
+ *
+ * Four descriptor spellings are tried in order of how much they can honour: the
+ * first carries a blend mode and an opacity, the later ones are progressively
+ * plainer fallbacks for builds that reject the richer form. The `_obj: 'stroke'`
+ * descriptor is deliberately absent — it hangs.
+ */
+function fillSelection(opacity, blendMode) {
+  var mode = { _enum: 'blendMode', _value: blendMode || 'normal' };
+  var percent = { _unit: 'percentUnit', _value: opacity };
+
+  var attempts = [
+    [{
+      _obj: 'fill',
+      using: { _enum: 'fill', _value: 'foregroundColor' },
+      mode: mode,
+      opacity: percent,
+      _options: { dialogOptions: 'dontDisplay' },
+    }],
+    [{
+      _obj: 'fill',
+      _target: [{ _ref: 'document', _enum: 'ordinal', _value: 'targetEnum' }],
+      using: { _enum: 'fill', _value: 'foregroundColor' },
+      mode: mode,
+      opacity: percent,
+      _options: { dialogOptions: 'dontDisplay' },
+    }],
+    [{
+      _obj: 'fill',
+      _target: [{ _ref: 'document', _enum: 'ordinal', _value: 'targetEnum' }],
+      using: { _enum: 'fill', _value: 'foregroundColor' },
+      opacity: percent,
+      _options: { dialogOptions: 'dontDisplay' },
+    }],
+    [{
+      _obj: 'fill',
+      _target: [{ _ref: 'layer', _enum: 'ordinal', _value: 'targetEnum' }],
+      using: { _enum: 'fill', _value: 'foregroundColor' },
+      _options: { dialogOptions: 'dontDisplay' },
+    }],
+  ];
+
+  function tryNext(index) {
+    if (index >= attempts.length) {
+      return Promise.reject(
+        StudioError('STEP_FAILED', 'Photoshop rejected every fill descriptor this build accepts.', {
+          recoverable: true,
+          details: { attempts: attempts.length },
+        }),
+      );
+    }
+    return batchPlay(attempts[index], { timeoutMs: 5000 }).then(
+      function (result) {
+        return { succeeded: true, attempt: index + 1, result: result };
+      },
+      function (err) {
+        Logger.info('fill: descriptor ' + (index + 1) + ' rejected', {
+          code: (err && err.code) || 'UNKNOWN',
+          message: (err && err.message) || String(err),
+        });
+        return tryNext(index + 1);
+      },
+    );
+  }
+
+  return tryNext(0);
+}
+
+/**
  * The active selection, or `null` when there is none.
  *
  * Read defensively: `selection.bounds` throws on some builds when nothing is
@@ -1287,6 +1397,8 @@ module.exports = {
   listDocumentIds: listDocumentIds,
   countLayers: countLayers,
   documentSelection: documentSelection,
+  fillSelection: fillSelection,
+  selectLayer: selectLayer,
 
   flattenLayers: flattenLayers,
   layerObjects: layerObjects,

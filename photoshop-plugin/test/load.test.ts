@@ -100,12 +100,13 @@ describe('UXP plugin loads', () => {
   });
 
   it('runs the plugin start-up path without throwing', async () => {
-    // Loading the module is not enough: `plugin.create` → `bridge.connect()` →
-    // `loadConfig()` is a separate code path, and a ReferenceError in there
-    // (an undeclared `storage`, say) leaves Photoshop with a plugin that loads
-    // and then silently never connects. This is exactly how that bug presented.
-    let pluginCreate: (() => void) | null = null;
+    // Loading the module is not enough: `bridge.connect()` → `loadConfig()` →
+    // `open()` is a separate code path, and an error in there (an undeclared
+    // `storage`, say) leaves Photoshop with a plugin that loads and then silently
+    // never connects. This is exactly how that bug presented.
     let registeredEntrypoints: string[] = [];
+    let registeredCommands: string[] = [];
+    let sawConnect = false;
 
     // Re-stub so the entrypoints we captured are observable.
     const uxpWithCapture = { ...uxpStub() } as Record<string, unknown>;
@@ -123,13 +124,38 @@ describe('UXP plugin loads', () => {
           const wrapped = uxpWithCapture as unknown as { entrypoints: { setup: typeof setupConfig } };
           wrapped.entrypoints = {
             setup: (handlers: Record<string, unknown>) => {
-              pluginCreate = (handlers.plugin as { create: () => void }).create;
+              // UXP has no `plugin` lifecycle hook. This test used to assert one
+              // existed and then call it, which meant it exercised a code path the
+              // host never runs — and the plugin consequently never connected while
+              // every test stayed green. `entrypoints.setup` takes `panels` and
+              // `commands`, and connecting happens at module load instead.
               registeredEntrypoints = Object.keys(handlers.panels as Record<string, unknown>);
+              registeredCommands = Object.keys(handlers.commands as Record<string, unknown>);
+              expect(handlers.plugin, 'a plugin entrypoint is not a UXP hook').toBeUndefined();
             },
           };
           return wrapped;
         }
         if (specifier === 'photoshop') return STUBS.photoshop;
+        if (specifier === './lib/bridge.js') {
+          // Spied rather than real, so the test can assert that *loading* the
+          // plugin is what asks for a connection. That assertion is the whole
+          // point: the connect used to live in a hook the host never calls, and
+          // every test here passed while the plugin stayed offline forever.
+          const real = loadPluginFile('lib/bridge.js') as unknown as Record<string, unknown>;
+          return new Proxy(real, {
+            get(target, prop) {
+              if (prop === 'connect') {
+                return (...args: unknown[]) => {
+                  sawConnect = true;
+                  return (target.connect as (...a: unknown[]) => unknown)(...args);
+                };
+              }
+              const value = target[prop as string];
+              return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+            },
+          });
+        }
         if (specifier.startsWith('.')) {
           const target = join(pluginRoot, specifier.replace(/^\.\//, ''));
           return loadPluginFile(target.slice(pluginRoot.length + 1));
@@ -143,17 +169,17 @@ describe('UXP plugin loads', () => {
     );
 
     expect(registeredEntrypoints, 'entrypoints.setup registered no panel').toContain('aiStudioPanel');
-    expect(typeof pluginCreate, 'entrypoints.setup registered no plugin.create').toBe('function');
+    expect(registeredCommands, 'entrypoints.setup registered no command').toContain('aiStudioReconnect');
 
-    // Photoshop invokes plugin.create() at start-up. This is the path that
-    // contains the config load and the socket connect, and an error here leaves
-    // the plugin loaded but permanently offline with nothing in any log.
-    expect(() => (pluginCreate as unknown as () => void)()).not.toThrow();
+    // Loading index.js is what connects. If this throws, the plugin is loaded but
+    // permanently offline with nothing in any log — which is exactly the failure
+    // this assertion exists to catch, and which it previously could not because it
+    // was calling a hook the host does not have.
+    expect(sawConnect, 'the plugin never asked the bridge to connect').toBe(true);
 
     // `connect` awaits loadConfig before opening the socket, so flush the
-    // microtask queue before asserting the connection was attempted.
+    // microtask queue before asserting nothing rejected on the way.
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(() => (pluginCreate as unknown as () => void)()).not.toThrow();
   });
 
   it('maps the host LayerKind values the way the schema expects', () => {

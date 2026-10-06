@@ -29,29 +29,31 @@ bridge.on('connect', function (connection) {
   require('./lib/ps.js').logLayerKindEnum();
 });
 
-entrypoints.setup({
-  plugin: {
-    create: function () {
-      Logger.setLevel('info');
-      // Connect eagerly: the panel may never be opened, and the AI should still
-      // be able to reach a document the user already has open.
-      //
-      // Nothing else may be logged here. `send()` silently drops a frame while
-      // the socket is closed, so anything logged before `connect()` resolves
-      // never reaches the MCP server — which is exactly why the startup
-      // diagnostics below hang off the `connect` event instead.
-      bridge.connect();
-    },
-    destroy: function () {
-      bridge.disconnect();
-    },
-  },
+Logger.setLevel('info');
 
+/**
+ * Start the in-folder log file before anything else can fail.
+ *
+ * `devTools` gates it so it is off in normal use. It has to be enabled *first*:
+ * the failure this exists to diagnose is the plugin going quiet during startup,
+ * and a log file that starts after that point records nothing useful.
+ */
+// Unconditional, and first. A sink gated on `config.devTools` cannot work during
+// module load, because the config has not been read yet — so the gate silently
+// kept it off in exactly the case it existed for. `appendToFile` is a no-op until
+// something calls `enableFileSink`, and it costs one file write.
+Logger.enableFileSink('ai-studio.log');
+
+entrypoints.setup({
   panels: {
     aiStudioPanel: {
       show: function (rootNode) {
         if (!ui) ui = createUi();
         ui.attach(rootNode);
+        // Opening the panel connects, so the plugin recovers without a restart.
+        // `connect()` is idempotent, so this is safe even when the module-load
+        // connect below already got there first.
+        bridge.connect();
         ui.render(bridge.getStats());
       },
       hide: function () {
@@ -74,6 +76,35 @@ entrypoints.setup({
     },
   },
 });
+
+/**
+ * Connect as soon as the plugin loads.
+ *
+ * `plugin.create` also connects, and it works — the MCP server's log shows the
+ * plugin reaching it repeatedly. This is belt and braces, and it is here for two
+ * measured reasons rather than on the belief that the entrypoint was broken:
+ *
+ *  - It does not depend on the panel ever being opened. `loadEvent: "startup"`
+ *    loads the plugin, but the AI should still reach a document the user already
+ *    has open without a UI interaction first.
+ *  - `connect()` is idempotent (see lib/bridge.js), so calling it from here, from
+ *    the panel's `show`, and from the reconnect command cannot produce a second
+ *    socket.
+ *
+ * An earlier version of this comment claimed UXP has no `plugin` lifecycle hook.
+ * That was wrong — it was inferred from a connection problem that turned out to
+ * be a duplicate MCP server in another checkout, not from anything about the
+ * plugin. Do not remove this call on the strength of that claim.
+ */
+try {
+  bridge.connect();
+} catch (err) {
+  // A throw here would abort the rest of this file. Everything below is a hoisted
+  // function declaration and `entrypoints.setup` has already run, so the panel
+  // would keep working perfectly and the plugin would simply never connect —
+  // indistinguishable from a network problem. Nothing after this line may throw.
+  console.error('AI Studio: bridge.connect() threw: ' + ((err && err.message) || String(err)));
+}
 
 // ---------------------------------------------------------------------------
 // panel UI
